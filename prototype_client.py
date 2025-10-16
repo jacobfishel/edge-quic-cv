@@ -6,7 +6,7 @@ import socket
 cam = cv2.VideoCapture(0)
 
 #change to server ip address
-server_ip = '192.168.4.42'
+server_ip = 'localhost'
 port = 1200
 
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
