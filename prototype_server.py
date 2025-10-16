@@ -7,7 +7,7 @@ from cvzone.FaceDetectionModule import FaceDetector
 detector = FaceDetector()
 
 #change to server ip address
-server_ip = '192.168.4.42'
+server_ip = 'localhost'
 port = 1200
 
 received_data = b""
