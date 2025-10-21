@@ -7,8 +7,8 @@ from cvzone.FaceDetectionModule import FaceDetector
 detector = FaceDetector()
 
 #change to server ip address
-server_ip = '192.168.4.42'
-port = 1200
+server_ip = '192.168.4.54'
+port = 5005
 
 received_data = b""
 payload_size = struct.calcsize("L")

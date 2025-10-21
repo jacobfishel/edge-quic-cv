@@ -4,10 +4,11 @@ import struct
 import socket
 
 cam = cv2.VideoCapture(0)
+cv2.CAP_PROP_BUFFERSIZE()
 
 #change to server ip address
-server_ip = '192.168.4.42'
-port = 1200
+server_ip = '192.168.4.54'
+port = 5005
 
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
