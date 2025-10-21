@@ -1,56 +1,74 @@
 import asyncio
+import struct
 import cv2
 import numpy as np
-from aioquic.asyncio import connect
+from aioquic.asyncio import serve
 from aioquic.quic.configuration import QuicConfiguration
+from cvzone.FaceDetectionModule import FaceDetector
 
-# Cloud server address & port
-CLOUD_HOST = "your.cloud.server.ip"  # replace with your cloud server IP or DNS
-CLOUD_PORT = 4433
+detector = FaceDetector()
 
-# QUIC TLS configuration (for testing, can skip verification)
-quic_config = QuicConfiguration(is_client=True)
-quic_config.verify_mode = False  # only for self-signed certs
+# QUIC configuration
+quic_config = QuicConfiguration(is_client=False)
+quic_config.verify_mode = False  # allow self-signed certs
 
-async def send_video():
-    # Connect to the cloud QUIC server
-    async with connect(CLOUD_HOST, CLOUD_PORT, configuration=quic_config) as client:
-        stream_id = client._quic.get_next_available_stream_id()
-        
-        # OpenCV webcam capture
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Cannot open webcam")
-            return
+async def handle_stream(reader, writer):
+    """Handle a single QUIC stream from the client."""
+    print("[+] Client connected over QUIC stream.")
 
-        print("Streaming video to cloud... Press Ctrl+C to stop.")
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+    buffer = b""
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break  # client disconnected
+            buffer += data
 
-                # Resize frame for faster transmission (optional)
-                frame = cv2.resize(frame, (320, 240))
+            while len(buffer) >= 4:
+                frame_len = struct.unpack("!I", buffer[:4])[0]
+                if len(buffer) < 4 + frame_len:
+                    break  # incomplete frame
 
-                # Encode frame as JPEG
-                _, buffer = cv2.imencode('.jpg', frame)
-                data = buffer.tobytes()
+                jpg_data = buffer[4:4 + frame_len]
+                buffer = buffer[4 + frame_len:]
 
-                # Send frame over QUIC stream
-                client._quic.send_stream_data(stream_id, data, end_stream=False)
-                await client._loop.run_in_executor(None, client._quic.transmit)
+                # Decode JPEG to image
+                np_data = np.frombuffer(jpg_data, np.uint8)
+                frame = cv2.imdecode(np_data, cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
 
-                # Wait for server response (inference results)
-                events = await client._loop.run_in_executor(None, client._quic.poll)
-                for event in events:
-                    if hasattr(event, 'data') and event.data:
-                        print("Received result:", event.data.decode())
+                # Detect faces in a thread to avoid blocking
+                frame, _ = await asyncio.to_thread(detector.findFaces, frame, True)
 
-        except KeyboardInterrupt:
-            print("Stopping video stream...")
-        finally:
-            cap.release()
+                # Display frame
+                cv2.imshow("QUIC Stream - Face Detection", frame)
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Quitting server display.")
+                    return
+
+    except Exception as e:
+        print(f"[!] Stream error: {e}")
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        cv2.destroyAllWindows()
+        print("[*] Client stream closed.")
+
+async def main():
+    server = await serve(
+        host="127.0.0.1",
+        port=6000,
+        configuration=quic_config,
+        stream_handler=handle_stream
+    )
+    print("[*] QUIC Face Detection Server running on port 6000.")
+
+    try:
+        await asyncio.Future()  # run forever
+    except asyncio.CancelledError:
+        pass
 
 if __name__ == "__main__":
-    asyncio.run(send_video())
+    asyncio.run(main())
