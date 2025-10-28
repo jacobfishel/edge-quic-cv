@@ -7,7 +7,7 @@ from aioquic.quic.configuration import QuicConfiguration
 CLOUD_HOST = "127.0.0.1"
 CLOUD_PORT = 6000
 
-quic_config = QuicConfiguration(is_client=True)
+quic_config = QuicConfiguration(is_client=True, alpn_protocols="hq-29")
 quic_config.verify_mode = False  # allow self-signed certs
 
 async def capture_frame(cap):
@@ -18,7 +18,7 @@ async def send_video():
     async with connect(CLOUD_HOST, CLOUD_PORT, configuration=quic_config) as client:
         # Create a new bidirectional stream
         stream = await client.create_stream()
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(1)
         if not cap.isOpened():
             print("Cannot open webcam")
             return

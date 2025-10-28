@@ -9,7 +9,10 @@ from cvzone.FaceDetectionModule import FaceDetector
 detector = FaceDetector()
 
 # QUIC configuration
-quic_config = QuicConfiguration(is_client=False)
+quic_config = QuicConfiguration(is_client=False,
+                                alpn_protocols="hq-29")
+quic_config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
+
 quic_config.verify_mode = False  # allow self-signed certs
 
 async def handle_stream(reader, writer):
