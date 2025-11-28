@@ -1,209 +1,245 @@
-#!/usr/bin/env python3
-"""Minimal QUIC server that receives frames and stores them for YOLO processing."""
-
-import cv2
-import os
 import asyncio
-import struct
-import time
-import threading
-from datetime import datetime, timedelta
+import cv2
 import numpy as np
+import threading
+import queue
+import base64
 from aioquic.asyncio import serve
 from aioquic.quic.configuration import QuicConfiguration
-from ultralytics import YOLO
-from flask import Flask, Response, jsonify
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from flask import Flask, send_from_directory
+from flask_cors import CORS
+import websockets
+import json
 
-# Global variables
-latest_frame = None
-detection_results = {"faces": [], "count": 0, "timestamp": None}
-model = None
-CERT_FILE = "cert.pem"
-KEY_FILE = "key.pem"
+# Thread-safe queue for frames
+frame_queue = queue.Queue(maxsize=5)
+# Queue for WebSocket clients (thread-safe)
+websocket_clients = set()
+websocket_clients_lock = threading.Lock()
+# Event loop for WebSocket server
+ws_loop = None
 
-# Flask app
-app = Flask(__name__)
+# Match the client's capture size
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
+FRAME_CHANNELS = 3
+FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * FRAME_CHANNELS
 
-def ensure_certificate():
-    """Create a self-signed certificate if none exists."""
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        return
+# Flask app for serving frontend
+app = Flask(__name__, static_folder='frontend/build', static_url_path='')
+CORS(app)
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "edge-quic"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
-        ]
-    )
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow() - timedelta(days=1))
-        .not_valid_after(datetime.utcnow() + timedelta(days=365))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
-            critical=False,
-        )
-        .sign(private_key=key, algorithm=hashes.SHA256())
-    )
+@app.route('/')
+def index():
+    return send_from_directory('frontend/build', 'index.html')
 
-    with open(KEY_FILE, "wb") as f:
-        f.write(
-            key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-
-    with open(CERT_FILE, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
-
-@app.route("/video")
-def video_feed():
-    """Stream current frame as MJPEG."""
-    def generate():
-        global latest_frame
-        while True:
-            if latest_frame is not None:
-                _, jpeg = cv2.imencode(".jpg", latest_frame)
-                frame = jpeg.tobytes()
-                yield (b"--frame\r\n"
-                       b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            else:
-                time.sleep(0.1)
-    
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
-
-@app.route("/detections")
+@app.route('/detections')
 def detections():
-    """Return latest YOLO results as JSON."""
-    return jsonify(detection_results)
+    return {
+        'faces': [],
+        'count': 0,
+        'timestamp': None
+    }
+
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory('frontend/build', path)
+
 
 async def handle_stream(reader, writer):
-    """Handle incoming QUIC stream data."""
-    global latest_frame
-    
+    """Handle QUIC stream - process incoming video frames."""
+    print("[+] Client connected over QUIC stream.")
     buffer = b""
-    print("Client connected")
-    
+    frame_count = 0
+
     try:
         while True:
+            # Read incoming data
             data = await reader.read(65536)
             if not data:
                 break
-            
             buffer += data
-            
+
             # Process complete frames
-            while len(buffer) >= 4:
-                # Read frame size (4 bytes, big-endian)
-                frame_size = struct.unpack("!I", buffer[:4])[0]
-                
-                # Check if we have complete frame
-                if len(buffer) < 4 + frame_size:
-                    break
-                
-                # Extract frame data
-                frame_data = buffer[4:4 + frame_size]
-                buffer = buffer[4 + frame_size:]
-                
-                # Decode JPEG frame
-                nparr = np.frombuffer(frame_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if frame is not None:
-                    latest_frame = frame
-                    process_frame(frame)
-                    print(f"Received frame: {frame.shape}")
-    
+            while len(buffer) >= FRAME_SIZE:
+                frame_data = buffer[:FRAME_SIZE]
+                buffer = buffer[FRAME_SIZE:]
+
+                # Convert bytes → numpy frame
+                frame = np.frombuffer(frame_data, dtype=np.uint8).reshape(
+                    (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
+                )
+
+                # Push to display queue
+                try:
+                    frame_queue.put_nowait(frame)
+                    frame_count += 1
+                    if frame_count % 30 == 0:  # Log every 30 frames
+                        print(f"[*] Processed {frame_count} frames")
+                except queue.Full:
+                    pass  # Drop frame if display thread is behind
+
+    except asyncio.IncompleteReadError:
+        print("[!] Client disconnected.")
     except Exception as e:
-        print(f"Stream error: {e}")
+        print(f"[!] Stream error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         writer.close()
         await writer.wait_closed()
-        print("Client disconnected")
+        print(f"[*] Client stream closed. Total frames: {frame_count}")
 
-def process_frame(frame):
-    """Process frame with YOLOv8 and update detection results."""
-    global detection_results, model
-    
-    if model is None or frame is None:
-        return
-    
-    # Run YOLOv8 detection
-    results = model(frame, verbose=False)
-    
-    # Extract face detections
-    faces = []
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            # Get bounding box coordinates and confidence
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            confidence = float(box.conf[0].cpu().numpy())
+def create_stream_handler():
+    """Create a stream handler that properly awaits the async function."""
+    async def handler(reader, writer):
+        await handle_stream(reader, writer)
+    return handler
+
+
+def frame_broadcaster():
+    """Broadcasts frames to all WebSocket clients."""
+    global ws_loop
+    broadcast_count = 0
+    print("[*] Frame broadcaster thread started")
+    while True:
+        try:
+            frame = frame_queue.get(timeout=1)
+            if frame is None:  # signal to exit
+                break
             
-            faces.append({
-                "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                "confidence": confidence
-            })
-    
-    # Update global detection results
-    detection_results = {
-        "faces": faces,
-        "count": len(faces),
-        "timestamp": time.time()
-    }
+            # Convert frame to JPEG
+            success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not success:
+                print("[!] Failed to encode frame")
+                continue
+                
+            frame_bytes = buffer.tobytes()
+            frame_b64 = base64.b64encode(frame_bytes).decode('utf-8')
+            
+            # Send to all connected WebSocket clients
+            message = json.dumps({'type': 'frame', 'data': frame_b64})
+            message_size = len(message)
+            disconnected = set()
+            
+            with websocket_clients_lock:
+                clients_copy = list(websocket_clients)
+            
+            if len(clients_copy) > 0:
+                for client in clients_copy:
+                    try:
+                        if ws_loop and ws_loop.is_running():
+                            future = asyncio.run_coroutine_threadsafe(
+                                client.send(message), 
+                                ws_loop
+                            )
+                            # Wait a bit to catch errors
+                            future.result(timeout=0.1)
+                    except Exception as e:
+                        print(f"[!] Error sending to client: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        disconnected.add(client)
+                
+                # Remove disconnected clients
+                with websocket_clients_lock:
+                    websocket_clients -= disconnected
+                
+                broadcast_count += 1
+                if broadcast_count % 30 == 0:
+                    print(f"[*] Broadcasted {broadcast_count} frames ({message_size} bytes) to {len(websocket_clients)} clients")
+            else:
+                if broadcast_count % 100 == 0:
+                    print(f"[!] No WebSocket clients connected. Frames in queue: {frame_queue.qsize()}")
+            
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"[!] Frame broadcaster error: {e}")
+            import traceback
+            traceback.print_exc()
 
-async def start_server():
-    """Start QUIC server."""
-    global model
-    
-    # Load YOLOv8 model once at startup
-    print("Loading YOLOv8 model...")
-    model = YOLO("yolov8n.pt")  # Use yolov8n-face.pt for face-specific model if available
-    print("Model loaded")
-    
-    ensure_certificate()
-    config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])
-    # For simplicity, disable certificate requirements
-    config.verify_mode = 0
-    config.load_cert_chain(CERT_FILE, KEY_FILE)
-    
-    host = "0.0.0.0"
-    port = 4433
-    
-    print(f"Starting QUIC server on {host}:{port}")
-    
-    await serve(
-        host=host,
-        port=port,
-        configuration=config,
-        stream_handler=handle_stream
-    )
-    
-    # Keep server running
-    await asyncio.Future()
+async def websocket_handler(websocket, path):
+    """Handle WebSocket connections for video streaming."""
+    print("[+] WebSocket client connected.")
+    with websocket_clients_lock:
+        websocket_clients.add(websocket)
+        print(f"[*] Total WebSocket clients: {len(websocket_clients)}")
+    try:
+        # Send a test message to verify connection
+        await websocket.send(json.dumps({'type': 'test', 'message': 'WebSocket connected'}))
+        print("[*] Sent test message to WebSocket client")
+        await websocket.wait_closed()
+    except Exception as e:
+        print(f"[!] WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        with websocket_clients_lock:
+            websocket_clients.discard(websocket)
+        print("[*] WebSocket client disconnected.")
 
-def start_flask():
-    """Start Flask server in a separate thread."""
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+def run_flask():
+    """Run Flask server in a separate thread."""
+    app.run(host='127.0.0.1', port=8080, debug=False, use_reloader=False)
+
+def run_websocket_server():
+    """Run WebSocket server."""
+    global ws_loop
+    ws_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(ws_loop)
+    start_server = websockets.serve(websocket_handler, "127.0.0.1", 8081)
+    ws_loop.run_until_complete(start_server)
+    print("[*] WebSocket server running on port 8081.")
+    ws_loop.run_forever()
+
+async def main():
+    quic_config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])
+    quic_config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
+
+    # Start Flask server thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("[*] Flask server starting on port 8080...")
+
+    # Start WebSocket server thread
+    ws_thread = threading.Thread(target=run_websocket_server, daemon=True)
+    ws_thread.start()
+
+    # Start frame broadcaster thread
+    broadcaster_thread = threading.Thread(target=frame_broadcaster, daemon=True)
+    broadcaster_thread.start()
+    print("[*] Frame broadcaster started.")
+
+    # Give other servers time to start
+    await asyncio.sleep(1)
+
+    # Start QUIC server
+    print("[*] QUIC Server starting on port 6000...")
+    try:
+        # Create stream handler wrapper
+        stream_handler = create_stream_handler()
+        # Start the QUIC server
+        server_task = asyncio.create_task(serve(
+            host="127.0.0.1",
+            port=6000,
+            configuration=quic_config,
+            stream_handler=stream_handler,
+        ))
+        await asyncio.sleep(0.5)  # Give it a moment to start
+        print("[*] QUIC Server running on port 6000.")
+        print("[*] All servers running. Press Ctrl+C to stop.")
+        
+        # Keep the event loop running forever
+        await asyncio.Future()
+    except KeyboardInterrupt:
+        print("\n[!] Shutting down...")
+    except Exception as e:
+        print(f"[!] QUIC Server error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
 
 if __name__ == "__main__":
-    # Start Flask in background thread
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-    print("Flask server starting on port 8080")
-    
-    # Run QUIC server in main thread
-    asyncio.run(start_server())
-
+    asyncio.run(main())
