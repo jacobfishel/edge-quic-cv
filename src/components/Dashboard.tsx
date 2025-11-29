@@ -1,15 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+
 interface Face {
   bbox: [number, number, number, number];
   confidence: number;
 }
+
 
 interface DetectionResults {
   faces: Face[];
   count: number;
   timestamp: number | null;
 }
+
 
 const Dashboard: React.FC = () => {
   const [detections, setDetections] = useState<DetectionResults>({
@@ -20,11 +23,13 @@ const Dashboard: React.FC = () => {
   const [originalVideoSrc, setOriginalVideoSrc] = useState<string>('');
   const [processedVideoSrc, setProcessedVideoSrc] = useState<string>('');
   const [overlayVideoSrc, setOverlayVideoSrc] = useState<string>('');
+  const [detectedVideoSrc, setDetectedVideoSrc] = useState<string>('');
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
   const [debugData, setDebugData] = useState<string>('');
   const [messageCount, setMessageCount] = useState<number>(0);
   const [lastMessage, setLastMessage] = useState<string>('');
   const wsRef = useRef<WebSocket | null>(null);
+
 
   useEffect(() => {
     const connectWebSocket = () => {
@@ -32,37 +37,41 @@ const Dashboard: React.FC = () => {
         const ws = new WebSocket('ws://localhost:8081');
         wsRef.current = ws;
 
+
         ws.onopen = () => {
           setConnectionStatus('Connected');
           setDebugData('WebSocket connection opened. Waiting for messages...');
         };
 
+
         ws.onmessage = (event) => {
           setMessageCount(prev => prev + 1);
           setLastMessage(event.data);
-          
+         
           // Show raw data preview (first 200 chars)
-          const preview = event.data.length > 200 
-            ? event.data.substring(0, 200) + '...' 
+          const preview = event.data.length > 200
+            ? event.data.substring(0, 200) + '...'
             : event.data;
-          
+         
           try {
             const message = JSON.parse(event.data);
             if (message.type === 'frame' && message.data && message.feed) {
               // Handle individual feed messages
               const feedType = message.feed;
               const frameId = message.frameId || 0;
-              
+             
               console.log(`Received ${feedType} feed, frameId: ${frameId}, data length: ${message.data.length}`);
-              
+             
               if (feedType === 'original') {
                 setOriginalVideoSrc(`data:image/jpeg;base64,${message.data}`);
               } else if (feedType === 'processed') {
                 setProcessedVideoSrc(`data:image/jpeg;base64,${message.data}`);
               } else if (feedType === 'overlay') {
                 setOverlayVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'detected') {
+                setDetectedVideoSrc(`data:image/jpeg;base64,${message.data}`);
               }
-              
+             
               setDebugData(`Frame ID: ${frameId}, Feed: ${feedType}, Data length: ${message.data.length}`);
             } else if (message.type === 'frames') {
               // Legacy: Handle all three feeds in one message
@@ -78,8 +87,8 @@ const Dashboard: React.FC = () => {
               setDebugData(`Message type: ${message.type}\nReceived all three video feeds`);
             } else if (message.type === 'frame' && message.data && !message.feed) {
               // Legacy single frame support (no feed type)
-              const dataPreview = message.data.length > 100 
-                ? message.data.substring(0, 100) + '...' 
+              const dataPreview = message.data.length > 100
+                ? message.data.substring(0, 100) + '...'
                 : message.data;
               setDebugData(`Message type: ${message.type}\nData length: ${message.data.length}\nData preview: ${dataPreview}`);
               setOriginalVideoSrc(`data:image/jpeg;base64,${message.data}`);
@@ -96,9 +105,11 @@ const Dashboard: React.FC = () => {
           }
         };
 
+
         ws.onerror = () => {
           setConnectionStatus('Error');
         };
+
 
         ws.onclose = () => {
           setConnectionStatus('Disconnected');
@@ -110,7 +121,9 @@ const Dashboard: React.FC = () => {
       }
     };
 
+
     connectWebSocket();
+
 
     const fetchDetections = async () => {
       try {
@@ -122,6 +135,7 @@ const Dashboard: React.FC = () => {
       }
     };
 
+
     fetchDetections();
     const interval = setInterval(fetchDetections, 500);
     return () => {
@@ -132,6 +146,7 @@ const Dashboard: React.FC = () => {
     };
   }, []);
 
+
   const containerStyle: React.CSSProperties = {
     fontFamily: 'Arial, sans-serif',
     margin: '0',
@@ -141,6 +156,7 @@ const Dashboard: React.FC = () => {
     color: '#e0e0e0',
   };
 
+
   const sectionStyle: React.CSSProperties = {
     background: '#2d2d2d',
     padding: '20px',
@@ -148,6 +164,7 @@ const Dashboard: React.FC = () => {
     marginBottom: '20px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
   };
+
 
   const detectionItemStyle: React.CSSProperties = {
     padding: '10px',
@@ -157,6 +174,7 @@ const Dashboard: React.FC = () => {
     borderRadius: '4px',
     color: '#e0e0e0',
   };
+
 
   const countBadgeStyle: React.CSSProperties = {
     display: 'inline-block',
@@ -168,6 +186,7 @@ const Dashboard: React.FC = () => {
     marginLeft: '10px',
   };
 
+
   const statusStyle: React.CSSProperties = {
     display: 'inline-block',
     padding: '4px 12px',
@@ -178,6 +197,7 @@ const Dashboard: React.FC = () => {
     color: 'white',
   };
 
+
   return (
     <div style={containerStyle}>
       <h1 style={{ color: '#e0e0e0', marginBottom: '20px' }}>
@@ -185,11 +205,12 @@ const Dashboard: React.FC = () => {
         <span style={statusStyle}>{connectionStatus}</span>
       </h1>
 
+
       <div style={sectionStyle}>
         <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Video Feeds</h2>
-        <div style={{ 
-          display: 'grid', 
-          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', 
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
           gap: '20px',
           marginTop: '20px'
         }}>
@@ -199,21 +220,21 @@ const Dashboard: React.FC = () => {
               Original Feed
             </h3>
             {originalVideoSrc ? (
-              <img 
-                src={originalVideoSrc} 
-                alt="Original video stream" 
-                style={{ 
-                  width: '100%', 
+              <img
+                src={originalVideoSrc}
+                alt="Original video stream"
+                style={{
+                  width: '100%',
                   height: 'auto',
-                  border: '2px solid #4CAF50', 
-                  borderRadius: '4px', 
-                  display: 'block' 
-                }} 
+                  border: '2px solid #4CAF50',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
               />
             ) : (
-              <div style={{ 
-                padding: '60px 20px', 
-                textAlign: 'center', 
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
                 color: '#888',
                 background: '#2d2d2d',
                 borderRadius: '4px'
@@ -223,27 +244,28 @@ const Dashboard: React.FC = () => {
             )}
           </div>
 
+
           {/* Processed Feed */}
           <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
             <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
               Processed Feed
             </h3>
             {processedVideoSrc ? (
-              <img 
-                src={processedVideoSrc} 
-                alt="Processed video stream" 
-                style={{ 
-                  width: '100%', 
+              <img
+                src={processedVideoSrc}
+                alt="Processed video stream"
+                style={{
+                  width: '100%',
                   height: 'auto',
-                  border: '2px solid #2196F3', 
-                  borderRadius: '4px', 
-                  display: 'block' 
-                }} 
+                  border: '2px solid #2196F3',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
               />
             ) : (
-              <div style={{ 
-                padding: '60px 20px', 
-                textAlign: 'center', 
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
                 color: '#888',
                 background: '#2d2d2d',
                 borderRadius: '4px'
@@ -253,27 +275,28 @@ const Dashboard: React.FC = () => {
             )}
           </div>
 
+
           {/* Detection Overlay Feed */}
           <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
             <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
               Detection Overlay
             </h3>
             {overlayVideoSrc ? (
-              <img 
-                src={overlayVideoSrc} 
-                alt="Detection overlay stream" 
-                style={{ 
-                  width: '100%', 
+              <img
+                src={overlayVideoSrc}
+                alt="Detection overlay stream"
+                style={{
+                  width: '100%',
                   height: 'auto',
-                  border: '2px solid #FF9800', 
-                  borderRadius: '4px', 
-                  display: 'block' 
-                }} 
+                  border: '2px solid #FF9800',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
               />
             ) : (
-              <div style={{ 
-                padding: '60px 20px', 
-                textAlign: 'center', 
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
                 color: '#888',
                 background: '#2d2d2d',
                 borderRadius: '4px'
@@ -282,8 +305,40 @@ const Dashboard: React.FC = () => {
               </div>
             )}
           </div>
+
+
+          {/* YOLOv8 Detection Feed (NEW) */}
+          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
+            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
+              YOLOv8 Detections
+            </h3>
+            {detectedVideoSrc ? (
+              <img
+                src={detectedVideoSrc}
+                alt="YOLOv8 detection stream"
+                style={{
+                  width: '100%',
+                  height: 'auto',
+                  border: '2px solid #9C27B0',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
+              />
+            ) : (
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
+                color: '#888',
+                background: '#2d2d2d',
+                borderRadius: '4px'
+              }}>
+                Waiting for YOLOv8 detection feed...
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
 
       <div style={sectionStyle}>
         <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Debug Info</h2>
@@ -302,6 +357,7 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
       </div>
+
 
       <div style={sectionStyle}>
         <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>
@@ -328,5 +384,7 @@ const Dashboard: React.FC = () => {
   );
 };
 
+
 export default Dashboard;
+
 
