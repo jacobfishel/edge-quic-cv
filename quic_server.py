@@ -25,7 +25,7 @@ ws_loop = None
 
 
 # YOLOv8 model (loaded once, thread-safe for inference)
-yolo_model = None
+yolo_model = 'yolov8n.pt'
 yolo_model_lock = threading.Lock()
 
 
@@ -297,7 +297,7 @@ def run_yolo_inference(frame):
             results = yolo_model(frame, verbose=False)
            
             # Draw detections on frame
-            annotated_frame = frame.copy()
+            annotated_frame = results[0].plot()
             detections = []
            
             # Person class ID in COCO dataset is 0
@@ -516,7 +516,7 @@ async def main():
     global yolo_model
     try:
         print("[*] Loading YOLOv8 model...")
-        yolo_model = YOLO('yolov8n.pt')  # Use nano model for speed
+        yolo_model = YOLO('yolov8n-seg.pt')  # Use nano model for speed
         print("[✓] YOLOv8 model loaded successfully")
     except Exception as e:
         print(f"[!] Failed to load YOLOv8 model: {e}")
