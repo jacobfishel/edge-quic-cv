@@ -182,7 +182,7 @@ async def websocket_handler(websocket, path):
     try:
         # Send initial connection confirmation
         await websocket.send(json.dumps({
-            'type': 'connected', 
+            'type': 'test', 
             'message': 'WebSocket connected'
         }))
         print("[*] Sent connection confirmation to WebSocket client")
