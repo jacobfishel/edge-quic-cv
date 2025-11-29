@@ -315,46 +315,6 @@ const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Debug Info</h2>
-        <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '4px', fontFamily: 'monospace', fontSize: '12px', color: '#0f0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Messages Received:</strong> {messageCount}
-          </div>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Last Message Length:</strong> {lastMessage.length} bytes
-          </div>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Last Message Preview:</strong>
-          </div>
-          <div style={{ background: '#000', padding: '10px', borderRadius: '4px', maxHeight: '300px', overflow: 'auto' }}>
-            {debugData || 'No data received yet...'}
-          </div>
-        </div>
-      </div>
-
-
-      <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>
-          Detections
-          {detections.count > 0 && <span style={countBadgeStyle}>{detections.count}</span>}
-        </h2>
-        {detections.faces && detections.faces.length > 0 ? (
-          <div>
-            {detections.faces.map((face, index) => (
-              <div key={index} style={detectionItemStyle}>
-                <strong>Face {index + 1}</strong>
-                <br />
-                Confidence: {(face.confidence * 100).toFixed(1)}%
-                <br />
-                BBox: [{face.bbox[0].toFixed(0)}, {face.bbox[1].toFixed(0)}, {face.bbox[2].toFixed(0)}, {face.bbox[3].toFixed(0)}]
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div style={{ color: '#888', fontStyle: 'italic' }}>No faces detected</div>
-        )}
-      </div>
     </div>
   );
 };
