@@ -32,4 +32,21 @@ Setup steps:
 -------------------------------------------------------------------------------------------------------------
 6. Run edge_client.py
 
-
+Install Python dependencies:
+   pip install -r requirments.txt
+Install Node.js dependencies (if not already installed):
+   npm install
+Build the React frontend:
+   npm run build
+This creates the frontend/build directory with the compiled React app.
+Start the QUIC server:
+   python quic_server.py
+This starts:
+QUIC server on port 6000 (receives video from client)
+Flask server on port 8080 (serves React frontend)
+WebSocket server on port 8081 (streams video to frontend)
+Start the client (in another terminal):
+   python client.py
+Open your browser:
+Navigate to http://localhost:8080 to see the video feed in the React dashboard.
+The video stream should appear in the browser once the client connects and starts sending frames. The dashboard shows connection status and will automatically reconnect if the WebSocket connection drops.
