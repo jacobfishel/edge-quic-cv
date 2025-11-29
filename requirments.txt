@@ -11,6 +11,7 @@ cryptography==46.0.3
 cycler==0.12.1
 filelock==3.20.0
 Flask==3.1.2
+Flask-Cors==6.0.1
 fonttools==4.60.1
 fsspec==2025.10.0
 idna==3.11
@@ -48,4 +49,5 @@ typing_extensions==4.15.0
 ultralytics==8.3.232
 ultralytics-thop==2.0.18
 urllib3==2.5.0
+websockets==15.0.1
 Werkzeug==3.1.3

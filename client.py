@@ -25,6 +25,7 @@ async def main():
         try:
             while True:
                 ret, frame = cap.read()
+                #print("reading frame")
                 if not ret:
                     break
 
@@ -34,8 +35,9 @@ async def main():
 
                 # write to the QUIC stream
                 writer.write(data)
+                #print("writing to QUIC stream")
                 await writer.drain()  # ensure data is sent
-
+                #print("ensure data is sent")
                 await asyncio.sleep(0.03)
 
         except KeyboardInterrupt:
@@ -45,6 +47,6 @@ async def main():
             writer.close()
             await writer.wait_closed()
             await client.wait_closed()
-
+            print("release resources")
 if __name__ == "__main__":
     asyncio.run(main())
