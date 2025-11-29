@@ -1,0 +1,45 @@
+# Python
+/venv
+/.venv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# SSL Certificates (should never be committed)
+cert.pem
+key.pem
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+frontend/build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model files (large, should be downloaded separately)
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
