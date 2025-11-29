@@ -48,8 +48,24 @@ const Dashboard: React.FC = () => {
           
           try {
             const message = JSON.parse(event.data);
-            if (message.type === 'frames') {
-              // Handle three video feeds
+            if (message.type === 'frame' && message.data && message.feed) {
+              // Handle individual feed messages
+              const feedType = message.feed;
+              const frameId = message.frameId || 0;
+              
+              console.log(`Received ${feedType} feed, frameId: ${frameId}, data length: ${message.data.length}`);
+              
+              if (feedType === 'original') {
+                setOriginalVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'processed') {
+                setProcessedVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'overlay') {
+                setOverlayVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              }
+              
+              setDebugData(`Frame ID: ${frameId}, Feed: ${feedType}, Data length: ${message.data.length}`);
+            } else if (message.type === 'frames') {
+              // Legacy: Handle all three feeds in one message
               if (message.original) {
                 setOriginalVideoSrc(`data:image/jpeg;base64,${message.original}`);
               }
@@ -60,8 +76,8 @@ const Dashboard: React.FC = () => {
                 setOverlayVideoSrc(`data:image/jpeg;base64,${message.overlay}`);
               }
               setDebugData(`Message type: ${message.type}\nReceived all three video feeds`);
-            } else if (message.type === 'frame' && message.data) {
-              // Legacy single frame support
+            } else if (message.type === 'frame' && message.data && !message.feed) {
+              // Legacy single frame support (no feed type)
               const dataPreview = message.data.length > 100 
                 ? message.data.substring(0, 100) + '...' 
                 : message.data;

@@ -98,8 +98,10 @@ async def handle_stream(reader, writer):
 
 def create_stream_handler():
     """Create a stream handler that properly awaits the async function."""
-    async def handler(reader, writer):
-        await handle_stream(reader, writer)
+    def handler(reader, writer):
+        # Get the current event loop and create a task
+        loop = asyncio.get_event_loop()
+        loop.create_task(handle_stream(reader, writer))
     return handler
 
 
@@ -116,56 +118,73 @@ def frame_broadcaster():
     global ws_loop
     broadcast_count = 0
     last_log_time = time.time()
+    frame_id = 0
     print("[*] Frame broadcaster thread started")
     
     while True:
         try:
             # Use timeout to avoid blocking forever
             frame = frame_queue.get(timeout=1)
+            frame_id += 1
             
             # Create three different video feeds
             # Feed 1: Original (raw frame)
             original_frame = frame.copy()
-            original_b64 = encode_frame(original_frame)
+            original_b64 = encode_frame(original_frame, quality=85)
             
-            # Feed 2: Processed (with potential annotations - currently same as original)
+            # Feed 2: Processed (with potential annotations)
             processed_frame = frame.copy()
-            # Add text label
             cv2.putText(processed_frame, 'Processed Feed', (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            processed_b64 = encode_frame(processed_frame)
+            processed_b64 = encode_frame(processed_frame, quality=85)
             
             # Feed 3: Detection overlay (visualization view)
             overlay_frame = frame.copy()
-            # Add overlay label
             cv2.putText(overlay_frame, 'Detection Overlay', (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            overlay_b64 = encode_frame(overlay_frame)
+            overlay_b64 = encode_frame(overlay_frame, quality=85)
             
             if not original_b64 or not processed_b64 or not overlay_b64:
                 print("[!] Failed to encode frame")
                 continue
-            
-            # Prepare message with all three feeds
-            message = json.dumps({
-                'type': 'frames',
-                'original': original_b64,
-                'processed': processed_b64,
-                'overlay': overlay_b64
-            })
             
             # Get a snapshot of clients
             with websocket_clients_lock:
                 clients_copy = list(websocket_clients)
             
             if len(clients_copy) > 0:
+                # Send each feed as a separate message with frame ID for synchronization
+                feeds = [
+                    ('original', original_b64),
+                    ('processed', processed_b64),
+                    ('overlay', overlay_b64)
+                ]
+                
                 # Schedule sends without blocking
                 for client in clients_copy:
                     try:
                         if ws_loop and ws_loop.is_running():
+                            # Create async function with proper closure - send all three feeds
+                            async def send_feeds(client_ws, feed_list, current_frame_id):
+                                try:
+                                    for feed_name, feed_data in feed_list:
+                                        msg = json.dumps({
+                                            'type': 'frame', 
+                                            'feed': feed_name, 
+                                            'data': feed_data, 
+                                            'frameId': current_frame_id
+                                        })
+                                        await client_ws.send(msg)
+                                    # Log first frame of each batch for debugging
+                                    if current_frame_id == 1 or current_frame_id % 30 == 0:
+                                        print(f"[*] Sent frame {current_frame_id} with all 3 feeds to WebSocket client")
+                                except Exception as e:
+                                    print(f"[!] Error sending feeds to client: {e}")
+                                    raise  # Re-raise to remove client
+                            
                             # Fire and forget - don't wait for result
                             asyncio.run_coroutine_threadsafe(
-                                client.send(message), 
+                                send_feeds(client, feeds, frame_id), 
                                 ws_loop
                             )
                     except Exception as e:
@@ -213,6 +232,7 @@ async def websocket_handler(websocket):
             'message': 'WebSocket connected'
         }))
         print("[*] Sent connection confirmation to WebSocket client")
+        print(f"[*] WebSocket client ready to receive video feeds")
         
         # Keep connection alive and handle any incoming messages
         async for message in websocket:
