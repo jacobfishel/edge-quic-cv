@@ -14,7 +14,7 @@ def main():
 
     # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    print(f"Connected. Sending raw frames via UDP to {CLOUD_HOST}:{UDP_PORT}... (Ctrl+C to stop)")
+    print(f"Connected. Sending JPEG-compressed frames via UDP to {CLOUD_HOST}:{UDP_PORT}... (Ctrl+C to stop)")
 
     try:
         while True:
@@ -22,14 +22,18 @@ def main():
             if not ret:
                 break
 
-            # Convert frame to bytes (uncompressed raw data)
-            data = frame.tobytes()
+            # Encode frame to JPEG before sending (compressed)
+            success, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+            if not success:
+                print("Failed to encode frame to JPEG")
+                continue
+            
+            # Convert JPEG encoded frame to bytes
+            data = encoded.tobytes()
             
             # Send via UDP
             # Note: UDP max packet size is ~65507 bytes
-            # For frames larger than this, we'd need fragmentation
-            # Current frame size: 640*480*3 = 921600 bytes (too large for single UDP packet)
-            # We'll send in chunks
+            # JPEG frames are much smaller than raw frames, but may still need chunking
             chunk_size = 60000  # Safe chunk size for UDP
             total_size = len(data)
             

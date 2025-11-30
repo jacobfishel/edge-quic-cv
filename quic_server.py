@@ -24,9 +24,15 @@ websocket_clients_lock = threading.Lock()
 ws_loop = None
 
 
-# YOLOv8 model (loaded once, thread-safe for inference)
-yolo_model = 'yolov8n.pt'
+# YOLOv8 models (loaded once, thread-safe for inference)
+model_det = None  # Standard detection model
+model_seg = None  # Segmentation model
+model_pose = None  # Pose estimation model
 yolo_model_lock = threading.Lock()
+
+# Thread-safe buffers for latest encoded frames (one per model)
+latest_frames = {'detection': None, 'segmentation': None, 'pose': None}
+latest_frames_lock = threading.Lock()
 
 
 # Frame skipping: process every Nth frame (1 = every frame, 3 = every 3rd frame)
@@ -213,20 +219,28 @@ def udp_frame_receiver():
                         frame_data += current_frame_buffer['chunks'][i]
                     else:
                         # All chunks received, process frame
-                        if len(frame_data) == total_size and total_size == FRAME_SIZE:
+                        if len(frame_data) == total_size:
                             # Frame skipping: only process every Nth frame
                             skip_counter += 1
                             if skip_counter % FRAME_SKIP != 0:
                                 current_frame_buffer = None
                                 continue  # Skip this frame
                             
-                            # Convert bytes → numpy frame
+                            # Decode JPEG bytes back to numpy frame
+                            # frame_data contains JPEG-compressed bytes
                             try:
-                                frame = np.frombuffer(frame_data, dtype=np.uint8).reshape(
-                                    (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
-                                )
+                                # Convert JPEG bytes to numpy array
+                                nparr = np.frombuffer(frame_data, dtype=np.uint8)
+                                # Decode JPEG to BGR frame
+                                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                                 
-                                # Push to display queue (non-blocking)
+                                # Check if decoding was successful
+                                if frame is None:
+                                    print(f"[!] UDP: Failed to decode JPEG frame (size: {total_size} bytes)")
+                                    current_frame_buffer = None
+                                    continue
+                                
+                                # Push decoded frame to display queue (non-blocking)
                                 try:
                                     frame_queue.put_nowait(frame)
                                     frame_count += 1
@@ -241,6 +255,9 @@ def udp_frame_receiver():
                                         pass
                             except Exception as e:
                                 print(f"[!] UDP frame processing error: {e}")
+                                # Ignore malformed JPEG frames and continue
+                                current_frame_buffer = None
+                                continue
                         
                         # Reset for next frame
                         current_frame_buffer = None
@@ -269,10 +286,14 @@ def udp_frame_receiver():
 
 
 
-def encode_frame(frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR):
-    """Encode frame to base64 JPEG with optional resizing."""
-    # Resize frame if needed for better performance
-    if resize_factor < 1.0:
+def encode_frame(frame, quality=JPEG_QUALITY, resize_factor=None):
+    """Encode frame to base64 JPEG.
+    
+    Note: Resizing should be done BEFORE calling this function for detection feeds.
+    For non-detection feeds, resize_factor can be provided to resize here.
+    """
+    # Resize frame if resize_factor is provided and < 1.0
+    if resize_factor is not None and resize_factor < 1.0:
         new_width = int(frame.shape[1] * resize_factor)
         new_height = int(frame.shape[0] * resize_factor)
         frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
@@ -284,21 +305,48 @@ def encode_frame(frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR):
     return base64.b64encode(frame_bytes).decode('utf-8')
 
 
-def run_yolo_inference(frame):
-    """Run YOLOv8 inference on a frame and return annotated frame and results.
-    Only returns 'person' class detections (class_id == 0)."""
-    global yolo_model
-    if yolo_model is None:
-        return frame.copy(), []
+def run_yolo_detection(frame, resize_factor=RESIZE_FACTOR):
+    """Run YOLOv8 detection model on a frame and return annotated frame.
+    Only returns 'person' class detections (class_id == 0).
+    
+    Pipeline:
+    1. Run detection on original full-resolution frame
+    2. Resize frame AFTER detection
+    3. Scale bounding boxes to match resized frame
+    4. Draw boxes on resized frame with improved visuals
+    """
+    global model_det
+    if model_det is None:
+        # Still resize even without model
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
    
     try:
         with yolo_model_lock:
-            # Run inference
-            results = yolo_model(frame, verbose=False)
+            # Store original frame dimensions
+            original_height, original_width = frame.shape[:2]
+            
+            # STEP 1: Run inference on original full-resolution frame
+            results = model_det(frame, verbose=False)
            
-            # Draw detections on frame
-            annotated_frame = results[0].plot()
-            detections = []
+            # STEP 2: Resize frame AFTER detection
+            if resize_factor < 1.0:
+                new_width = int(original_width * resize_factor)
+                new_height = int(original_height * resize_factor)
+                resized_frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized_frame = frame.copy()
+                new_width, new_height = original_width, original_height
+            
+            # Calculate scale factors for bounding boxes
+            scale_x = new_width / original_width
+            scale_y = new_height / original_height
+           
+            # Draw detections on resized frame
+            annotated_frame = resized_frame.copy()
            
             # Person class ID in COCO dataset is 0
             PERSON_CLASS_ID = 0
@@ -306,36 +354,313 @@ def run_yolo_inference(frame):
             for result in results:
                 boxes = result.boxes
                 for box in boxes:
-                    # Get box coordinates
+                    # Get box coordinates from original frame
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     confidence = box.conf[0].cpu().numpy()
                     cls = int(box.cls[0].cpu().numpy())
                     
                     # Filter: only process 'person' class (class_id == 0)
                     if cls != PERSON_CLASS_ID:
-                        continue  # Skip non-person detections
+                        continue
                     
-                    class_name = yolo_model.names[cls]  # Should be 'person'
+                    # Filter: only keep detections with confidence above 0.35
+                    if confidence <= 0.35:
+                        continue
+                    
+                    class_name = model_det.names[cls]  # Should be 'person'
                    
+                    # STEP 3: Scale bounding boxes to match resized frame
+                    x1_scaled = int(x1 * scale_x)
+                    y1_scaled = int(y1 * scale_y)
+                    x2_scaled = int(x2 * scale_x)
+                    y2_scaled = int(y2 * scale_y)
+                   
+                    # STEP 4: Draw bounding box with improved visuals (thickness=3, anti-aliased)
+                    cv2.rectangle(annotated_frame, (x1_scaled, y1_scaled), (x2_scaled, y2_scaled), 
+                                (0, 255, 0), 3, cv2.LINE_AA)
+                   
+                    # Draw label with improved visuals
+                    label = f"{class_name} {confidence:.2f}"
+                    (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 3)
+                    
+                    # Draw filled rectangle behind text for readability
+                    cv2.rectangle(annotated_frame, 
+                                (x1_scaled, y1_scaled - text_height - baseline - 5),
+                                (x1_scaled + text_width, y1_scaled),
+                                (0, 255, 0), -1, cv2.LINE_AA)
+                    
+                    # Draw text on top of filled rectangle
+                    cv2.putText(annotated_frame, label, (x1_scaled, y1_scaled - baseline - 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 3, cv2.LINE_AA)
+           
+            return annotated_frame
+    except Exception as e:
+        print(f"[!] YOLOv8 detection inference error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return resized frame even on error
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
+
+
+def run_yolo_segmentation(frame, resize_factor=RESIZE_FACTOR):
+    """Run YOLOv8 segmentation model on a frame and return annotated frame.
+    Only returns 'person' class detections (class_id == 0).
+    
+    Pipeline:
+    1. Run segmentation on original full-resolution frame
+    2. Resize frame AFTER detection
+    3. Scale masks and boxes to match resized frame
+    4. Draw masks and boxes on resized frame
+    """
+    global model_seg
+    if model_seg is None:
+        # Still resize even without model
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
+   
+    try:
+        with yolo_model_lock:
+            # Store original frame dimensions
+            original_height, original_width = frame.shape[:2]
+            
+            # STEP 1: Run inference on original full-resolution frame
+            results = model_seg(frame, verbose=False)
+           
+            # STEP 2: Resize frame AFTER detection
+            if resize_factor < 1.0:
+                new_width = int(original_width * resize_factor)
+                new_height = int(original_height * resize_factor)
+                resized_frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized_frame = frame.copy()
+                new_width, new_height = original_width, original_height
+            
+            # Calculate scale factors
+            scale_x = new_width / original_width
+            scale_y = new_height / original_height
+           
+            # Draw detections on resized frame
+            annotated_frame = resized_frame.copy()
+           
+            # Person class ID in COCO dataset is 0
+            PERSON_CLASS_ID = 0
+           
+            for result in results:
+                boxes = result.boxes
+                masks = result.masks
+                
+                for i, box in enumerate(boxes):
+                    # Get box coordinates from original frame
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = box.conf[0].cpu().numpy()
+                    cls = int(box.cls[0].cpu().numpy())
+                    
+                    # Filter: only process 'person' class (class_id == 0)
+                    if cls != PERSON_CLASS_ID:
+                        continue
+                    
+                    # Filter: only keep detections with confidence above 0.35
+                    if confidence <= 0.35:
+                        continue
+                    
+                    class_name = model_seg.names[cls]  # Should be 'person'
+                   
+                    # Scale bounding boxes
+                    x1_scaled = int(x1 * scale_x)
+                    y1_scaled = int(y1 * scale_y)
+                    x2_scaled = int(x2 * scale_x)
+                    y2_scaled = int(y2 * scale_y)
+                   
+                    # Draw segmentation mask if available
+                    if masks is not None and i < len(masks.data):
+                        mask = masks.data[i].cpu().numpy()
+                        # Resize mask to match resized frame
+                        mask_resized = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+                        mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
+                        
+                        # Create colored mask overlay (semi-transparent green)
+                        mask_colored = np.zeros_like(annotated_frame)
+                        mask_colored[mask_binary > 0] = [0, 255, 0]
+                        annotated_frame = cv2.addWeighted(annotated_frame, 0.7, mask_colored, 0.3, 0)
+                    
                     # Draw bounding box
-                    cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    cv2.rectangle(annotated_frame, (x1_scaled, y1_scaled), (x2_scaled, y2_scaled), 
+                                (0, 255, 0), 3, cv2.LINE_AA)
                    
                     # Draw label
                     label = f"{class_name} {confidence:.2f}"
-                    cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                   
-                    # Store detection
-                    detections.append({
-                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
-                        'confidence': float(confidence),
-                        'class': class_name
-                    })
+                    (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 3)
+                    
+                    # Draw filled rectangle behind text
+                    cv2.rectangle(annotated_frame, 
+                                (x1_scaled, y1_scaled - text_height - baseline - 5),
+                                (x1_scaled + text_width, y1_scaled),
+                                (0, 255, 0), -1, cv2.LINE_AA)
+                    
+                    # Draw text
+                    cv2.putText(annotated_frame, label, (x1_scaled, y1_scaled - baseline - 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 3, cv2.LINE_AA)
            
-            return annotated_frame, detections
+            return annotated_frame
     except Exception as e:
-        print(f"[!] YOLOv8 inference error: {e}")
-        return frame.copy(), []
+        print(f"[!] YOLOv8 segmentation inference error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return resized frame even on error
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
+
+
+def run_yolo_pose(frame, resize_factor=RESIZE_FACTOR):
+    """Run YOLOv8 pose estimation model on a frame and return annotated frame.
+    Only returns 'person' class detections (class_id == 0).
+    
+    Pipeline:
+    1. Run pose estimation on original full-resolution frame
+    2. Resize frame AFTER detection
+    3. Scale keypoints to match resized frame
+    4. Draw skeleton and keypoints on resized frame
+    """
+    global model_pose
+    if model_pose is None:
+        # Still resize even without model
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
+   
+    try:
+        with yolo_model_lock:
+            # Store original frame dimensions
+            original_height, original_width = frame.shape[:2]
+            
+            # STEP 1: Run inference on original full-resolution frame
+            results = model_pose(frame, verbose=False)
+           
+            # STEP 2: Resize frame AFTER detection
+            if resize_factor < 1.0:
+                new_width = int(original_width * resize_factor)
+                new_height = int(original_height * resize_factor)
+                resized_frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized_frame = frame.copy()
+                new_width, new_height = original_width, original_height
+            
+            # Calculate scale factors
+            scale_x = new_width / original_width
+            scale_y = new_height / original_height
+           
+            # Draw detections on resized frame
+            annotated_frame = resized_frame.copy()
+           
+            # Person class ID in COCO dataset is 0
+            PERSON_CLASS_ID = 0
+            
+            # COCO pose keypoint connections (17 keypoints)
+            skeleton = [
+                [0, 1], [0, 2], [1, 3], [2, 4],  # Head to shoulders
+                [5, 6],  # Shoulders
+                [5, 7], [7, 9], [6, 8], [8, 10],  # Arms
+                [5, 11], [6, 12],  # Torso
+                [11, 13], [13, 15], [12, 14], [14, 16]  # Legs
+            ]
+           
+            for result in results:
+                boxes = result.boxes
+                keypoints = result.keypoints
+                
+                for i, box in enumerate(boxes):
+                    # Get box coordinates from original frame
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = box.conf[0].cpu().numpy()
+                    cls = int(box.cls[0].cpu().numpy())
+                    
+                    # Filter: only process 'person' class (class_id == 0)
+                    if cls != PERSON_CLASS_ID:
+                        continue
+                    
+                    # Filter: only keep detections with confidence above 0.35
+                    if confidence <= 0.35:
+                        continue
+                    
+                    class_name = model_pose.names[cls]  # Should be 'person'
+                   
+                    # Scale bounding boxes
+                    x1_scaled = int(x1 * scale_x)
+                    y1_scaled = int(y1 * scale_y)
+                    x2_scaled = int(x2 * scale_x)
+                    y2_scaled = int(y2 * scale_y)
+                   
+                    # Draw bounding box
+                    cv2.rectangle(annotated_frame, (x1_scaled, y1_scaled), (x2_scaled, y2_scaled), 
+                                (0, 255, 0), 3, cv2.LINE_AA)
+                   
+                    # Draw keypoints and skeleton if available
+                    if keypoints is not None and i < len(keypoints.data):
+                        kpts = keypoints.data[i].cpu().numpy()  # Shape: [17, 3] (x, y, visibility)
+                        
+                        # Draw skeleton connections
+                        for connection in skeleton:
+                            pt1_idx, pt2_idx = connection
+                            if pt1_idx < len(kpts) and pt2_idx < len(kpts):
+                                pt1 = kpts[pt1_idx]
+                                pt2 = kpts[pt2_idx]
+                                
+                                # Check visibility (visibility > 0 means visible)
+                                if pt1[2] > 0 and pt2[2] > 0:
+                                    # Scale keypoints
+                                    x1_kpt = int(pt1[0] * scale_x)
+                                    y1_kpt = int(pt1[1] * scale_y)
+                                    x2_kpt = int(pt2[0] * scale_x)
+                                    y2_kpt = int(pt2[1] * scale_y)
+                                    
+                                    # Draw skeleton line
+                                    cv2.line(annotated_frame, (x1_kpt, y1_kpt), (x2_kpt, y2_kpt),
+                                           (255, 0, 0), 2, cv2.LINE_AA)
+                        
+                        # Draw keypoints
+                        for kpt in kpts:
+                            if kpt[2] > 0:  # If visible
+                                x_kpt = int(kpt[0] * scale_x)
+                                y_kpt = int(kpt[1] * scale_y)
+                                cv2.circle(annotated_frame, (x_kpt, y_kpt), 4, (0, 0, 255), -1, cv2.LINE_AA)
+                   
+                    # Draw label
+                    label = f"{class_name} {confidence:.2f}"
+                    (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 3)
+                    
+                    # Draw filled rectangle behind text
+                    cv2.rectangle(annotated_frame, 
+                                (x1_scaled, y1_scaled - text_height - baseline - 5),
+                                (x1_scaled + text_width, y1_scaled),
+                                (0, 255, 0), -1, cv2.LINE_AA)
+                    
+                    # Draw text
+                    cv2.putText(annotated_frame, label, (x1_scaled, y1_scaled - baseline - 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 3, cv2.LINE_AA)
+           
+            return annotated_frame
+    except Exception as e:
+        print(f"[!] YOLOv8 pose inference error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return resized frame even on error
+        if resize_factor < 1.0:
+            new_width = int(frame.shape[1] * resize_factor)
+            new_height = int(frame.shape[0] * resize_factor)
+            return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        return frame.copy()
 
 
 def frame_broadcaster():
@@ -352,27 +677,61 @@ def frame_broadcaster():
             frame = frame_queue.get(timeout=1)
             frame_id += 1
            
-            # Feed 1: Original (raw frame) - with throttling
+            # Feed 1: Original (raw frame) - resize before encoding
             original_frame = frame.copy()
-            original_b64 = encode_frame(original_frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR)
+            if RESIZE_FACTOR < 1.0:
+                new_width = int(original_frame.shape[1] * RESIZE_FACTOR)
+                new_height = int(original_frame.shape[0] * RESIZE_FACTOR)
+                original_frame = cv2.resize(original_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            original_b64 = encode_frame(original_frame, quality=JPEG_QUALITY, resize_factor=None)
            
-            # Feed 2: Processed (with potential annotations)
+            # Feed 2: Processed (with potential annotations) - resize before encoding
             processed_frame = frame.copy()
+            if RESIZE_FACTOR < 1.0:
+                new_width = int(processed_frame.shape[1] * RESIZE_FACTOR)
+                new_height = int(processed_frame.shape[0] * RESIZE_FACTOR)
+                processed_frame = cv2.resize(processed_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             cv2.putText(processed_frame, 'Processed Feed', (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            processed_b64 = encode_frame(processed_frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR)
+            processed_b64 = encode_frame(processed_frame, quality=JPEG_QUALITY, resize_factor=None)
            
-            # Feed 3: Detection overlay (visualization view)
+            # Feed 3: Detection overlay (visualization view) - resize before encoding
             overlay_frame = frame.copy()
+            if RESIZE_FACTOR < 1.0:
+                new_width = int(overlay_frame.shape[1] * RESIZE_FACTOR)
+                new_height = int(overlay_frame.shape[0] * RESIZE_FACTOR)
+                overlay_frame = cv2.resize(overlay_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             cv2.putText(overlay_frame, 'Detection Overlay', (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            overlay_b64 = encode_frame(overlay_frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR)
+            overlay_b64 = encode_frame(overlay_frame, quality=JPEG_QUALITY, resize_factor=None)
            
-            # Feed 4: YOLOv8 Detection feed (NEW)
-            detected_frame, detections = run_yolo_inference(frame)
-            detected_b64 = encode_frame(detected_frame, quality=JPEG_QUALITY, resize_factor=RESIZE_FACTOR)
+            # Run inference on all three YOLO models
+            # Each model processes the original frame independently
+            detection_frame = run_yolo_detection(frame, resize_factor=RESIZE_FACTOR)
+            segmentation_frame = run_yolo_segmentation(frame, resize_factor=RESIZE_FACTOR)
+            pose_frame = run_yolo_pose(frame, resize_factor=RESIZE_FACTOR)
+            
+            # Encode each annotated frame to base64 JPEG
+            det_b64 = encode_frame(detection_frame, quality=JPEG_QUALITY, resize_factor=None)
+            seg_b64 = encode_frame(segmentation_frame, quality=JPEG_QUALITY, resize_factor=None)
+            pose_b64 = encode_frame(pose_frame, quality=JPEG_QUALITY, resize_factor=None)
+            
+            # Store encoded frames in thread-safe buffers
+            with latest_frames_lock:
+                if det_b64:
+                    latest_frames['detection'] = det_b64
+                else:
+                    print("[!] Missing encoded feed: detection")
+                if seg_b64:
+                    latest_frames['segmentation'] = seg_b64
+                else:
+                    print("[!] Missing encoded feed: segmentation")
+                if pose_b64:
+                    latest_frames['pose'] = pose_b64
+                else:
+                    print("[!] Missing encoded feed: pose")
            
-            if not original_b64 or not processed_b64 or not overlay_b64 or not detected_b64:
+            if not original_b64 or not processed_b64 or not overlay_b64:
                 print("[!] Failed to encode frame")
                 continue
            
@@ -381,22 +740,36 @@ def frame_broadcaster():
                 clients_copy = list(websocket_clients)
            
             if len(clients_copy) > 0:
-                # Send each feed as a separate message with frame ID for synchronization
-                feeds = [
+                # Send each feed as a separate message (one message per feed)
+                # Send original feeds first
+                original_feeds = [
                     ('original', original_b64),
                     ('processed', processed_b64),
-                    ('overlay', overlay_b64),
-                    ('detected', detected_b64)  # NEW: YOLOv8 detection feed
+                    ('overlay', overlay_b64)
                 ]
+                
+                # Send YOLO model feeds separately (one message per model)
+                yolo_feeds = []
+                with latest_frames_lock:
+                    if latest_frames['detection']:
+                        yolo_feeds.append(('detection', latest_frames['detection']))
+                    if latest_frames['segmentation']:
+                        yolo_feeds.append(('segmentation', latest_frames['segmentation']))
+                    if latest_frames['pose']:
+                        yolo_feeds.append(('pose', latest_frames['pose']))
+                
+                # Combine all feeds
+                all_feeds = original_feeds + yolo_feeds
                
-                # Schedule sends without blocking
+                # Schedule sends without blocking - send ONE message per feed
                 for client in clients_copy:
                     try:
                         if ws_loop and ws_loop.is_running():
-                            # Create async function with proper closure - send all three feeds
-                            async def send_feeds(client_ws, feed_list, current_frame_id):
+                            # Create async function to send feeds individually
+                            async def send_feeds_individually(client_ws, feed_list, current_frame_id, num_clients):
                                 try:
                                     for feed_name, feed_data in feed_list:
+                                        # Send ONE message per feed
                                         msg = json.dumps({
                                             'type': 'frame',
                                             'feed': feed_name,
@@ -404,16 +777,20 @@ def frame_broadcaster():
                                             'frameId': current_frame_id
                                         })
                                         await client_ws.send(msg)
-                                    # Log first frame of each batch for debugging
+                                    
+                                    # Log periodically
                                     if current_frame_id == 1 or current_frame_id % 30 == 0:
-                                        print(f"[*] Sent frame {current_frame_id} with all 4 feeds to WebSocket client")
+                                        det_count = len([f for f in feed_list if f[0] == 'detection'])
+                                        seg_count = len([f for f in feed_list if f[0] == 'segmentation'])
+                                        pose_count = len([f for f in feed_list if f[0] == 'pose'])
+                                        print(f"[*] Broadcasting frame {current_frame_id} -> detection:{det_count}, seg:{seg_count}, pose:{pose_count} to {num_clients} client(s)")
                                 except Exception as e:
                                     print(f"[!] Error sending feeds to client: {e}")
                                     raise  # Re-raise to remove client
                            
                             # Fire and forget - don't wait for result
                             asyncio.run_coroutine_threadsafe(
-                                send_feeds(client, feeds, frame_id),
+                                send_feeds_individually(client, all_feeds, frame_id, len(clients_copy)), 
                                 ws_loop
                             )
                     except Exception as e:
@@ -488,8 +865,10 @@ async def websocket_handler(websocket):
 
 def run_flask():
     """Run Flask server in a separate thread."""
-    print("[*] Starting Flask server on http://127.0.0.1:8080")
-    app.run(host='127.0.0.1', port=8080, debug=False, use_reloader=False)
+    host = '127.0.0.1'
+    port = 8080
+    print(f"[*] Starting Flask server on http://{host}:{port}")
+    app.run(host, port, debug=False, use_reloader=False)
 
 
 def run_websocket_server():
@@ -512,16 +891,34 @@ async def main():
     print("Starting Edge QUIC CV Server")
     print("=" * 50)
    
-    # Load YOLOv8 model
-    global yolo_model
+    # Load YOLOv8 models
+    global model_det, model_seg, model_pose
     try:
-        print("[*] Loading YOLOv8 model...")
-        yolo_model = YOLO('yolov8n-seg.pt')  # Use nano model for speed
-        print("[✓] YOLOv8 model loaded successfully")
+        print("[*] Loading YOLOv8 detection model...")
+        model_det = YOLO('yolov8n.pt')  # Standard detection model
+        print("[✓] YOLOv8 detection model loaded successfully")
     except Exception as e:
-        print(f"[!] Failed to load YOLOv8 model: {e}")
-        print("[!] Continuing without YOLOv8 inference")
-        yolo_model = None
+        print(f"[!] Failed to load YOLOv8 detection model: {e}")
+        print("[!] Continuing without detection inference")
+        model_det = None
+    
+    try:
+        print("[*] Loading YOLOv8 segmentation model...")
+        model_seg = YOLO('yolov8n-seg.pt')  # Segmentation model
+        print("[✓] YOLOv8 segmentation model loaded successfully")
+    except Exception as e:
+        print(f"[!] Failed to load YOLOv8 segmentation model: {e}")
+        print("[!] Continuing without segmentation inference")
+        model_seg = None
+    
+    try:
+        print("[*] Loading YOLOv8 pose estimation model...")
+        model_pose = YOLO('yolov8n-pose.pt')  # Pose estimation model
+        print("[✓] YOLOv8 pose estimation model loaded successfully")
+    except Exception as e:
+        print(f"[!] Failed to load YOLOv8 pose estimation model: {e}")
+        print("[!] Continuing without pose estimation inference")
+        model_pose = None
    
     # Load QUIC configuration
     quic_config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])

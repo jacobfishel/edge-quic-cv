@@ -24,6 +24,8 @@ const Dashboard: React.FC = () => {
   const [processedVideoSrc, setProcessedVideoSrc] = useState<string>('');
   const [overlayVideoSrc, setOverlayVideoSrc] = useState<string>('');
   const [detectedVideoSrc, setDetectedVideoSrc] = useState<string>('');
+  const [segmentedVideoSrc, setSegmentedVideoSrc] = useState<string>('');
+  const [poseVideoSrc, setPoseVideoSrc] = useState<string>('');
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
   const [debugData, setDebugData] = useState<string>('');
   const [messageCount, setMessageCount] = useState<number>(0);
@@ -70,6 +72,12 @@ const Dashboard: React.FC = () => {
                 setOverlayVideoSrc(`data:image/jpeg;base64,${message.data}`);
               } else if (feedType === 'detected') {
                 setDetectedVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'detection') {
+                setDetectedVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'segmentation') {
+                setSegmentedVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              } else if (feedType === 'pose') {
+                setPoseVideoSrc(`data:image/jpeg;base64,${message.data}`);
               }
              
               setDebugData(`Frame ID: ${frameId}, Feed: ${feedType}, Data length: ${message.data.length}`);
@@ -207,110 +215,18 @@ const Dashboard: React.FC = () => {
 
 
       <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Video Feeds</h2>
+        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>YOLOv8 Model Feeds</h2>
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          display: 'flex',
+          flexDirection: 'row',
           gap: '20px',
-          marginTop: '20px'
+          marginTop: '20px',
+          flexWrap: 'wrap'
         }}>
-          {/* Original Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
+          {/* YOLOv8 Detection Feed */}
+          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
             <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              Original Feed
-            </h3>
-            {originalVideoSrc ? (
-              <img
-                src={originalVideoSrc}
-                alt="Original video stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #4CAF50',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
-                padding: '60px 20px',
-                textAlign: 'center',
-                color: '#888',
-                background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for original feed...
-              </div>
-            )}
-          </div>
-
-
-          {/* Processed Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              Processed Feed
-            </h3>
-            {processedVideoSrc ? (
-              <img
-                src={processedVideoSrc}
-                alt="Processed video stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #2196F3',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
-                padding: '60px 20px',
-                textAlign: 'center',
-                color: '#888',
-                background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for processed feed...
-              </div>
-            )}
-          </div>
-
-
-          {/* Detection Overlay Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              Detection Overlay
-            </h3>
-            {overlayVideoSrc ? (
-              <img
-                src={overlayVideoSrc}
-                alt="Detection overlay stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #FF9800',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
-                padding: '60px 20px',
-                textAlign: 'center',
-                color: '#888',
-                background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for overlay feed...
-              </div>
-            )}
-          </div>
-
-
-          {/* YOLOv8 Detection Feed (NEW) */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              YOLOv8 Detections
+              YOLOv8 Detection
             </h3>
             {detectedVideoSrc ? (
               <img
@@ -336,50 +252,69 @@ const Dashboard: React.FC = () => {
               </div>
             )}
           </div>
-        </div>
-      </div>
 
-
-      <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Debug Info</h2>
-        <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '4px', fontFamily: 'monospace', fontSize: '12px', color: '#0f0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Messages Received:</strong> {messageCount}
-          </div>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Last Message Length:</strong> {lastMessage.length} bytes
-          </div>
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Last Message Preview:</strong>
-          </div>
-          <div style={{ background: '#000', padding: '10px', borderRadius: '4px', maxHeight: '300px', overflow: 'auto' }}>
-            {debugData || 'No data received yet...'}
-          </div>
-        </div>
-      </div>
-
-
-      <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>
-          Detections
-          {detections.count > 0 && <span style={countBadgeStyle}>{detections.count}</span>}
-        </h2>
-        {detections.faces && detections.faces.length > 0 ? (
-          <div>
-            {detections.faces.map((face, index) => (
-              <div key={index} style={detectionItemStyle}>
-                <strong>Face {index + 1}</strong>
-                <br />
-                Confidence: {(face.confidence * 100).toFixed(1)}%
-                <br />
-                BBox: [{face.bbox[0].toFixed(0)}, {face.bbox[1].toFixed(0)}, {face.bbox[2].toFixed(0)}, {face.bbox[3].toFixed(0)}]
+          {/* YOLOv8 Segmentation Feed */}
+          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
+            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
+              YOLOv8 Segmentation
+            </h3>
+            {segmentedVideoSrc ? (
+              <img
+                src={segmentedVideoSrc}
+                alt="YOLOv8 segmentation stream"
+                style={{
+                  width: '100%',
+                  height: 'auto',
+                  border: '2px solid #00BCD4',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
+              />
+            ) : (
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
+                color: '#888',
+                background: '#2d2d2d',
+                borderRadius: '4px'
+              }}>
+                Waiting for YOLOv8 segmentation feed...
               </div>
-            ))}
+            )}
           </div>
-        ) : (
-          <div style={{ color: '#888', fontStyle: 'italic' }}>No faces detected</div>
-        )}
+
+          {/* YOLOv8 Pose Estimation Feed */}
+          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
+            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
+              YOLOv8 Pose Estimation
+            </h3>
+            {poseVideoSrc ? (
+              <img
+                src={poseVideoSrc}
+                alt="YOLOv8 pose estimation stream"
+                style={{
+                  width: '100%',
+                  height: 'auto',
+                  border: '2px solid #FF5722',
+                  borderRadius: '4px',
+                  display: 'block'
+                }}
+              />
+            ) : (
+              <div style={{
+                padding: '60px 20px',
+                textAlign: 'center',
+                color: '#888',
+                background: '#2d2d2d',
+                borderRadius: '4px'
+              }}>
+                Waiting for YOLOv8 pose estimation feed...
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+
     </div>
   );
 };
