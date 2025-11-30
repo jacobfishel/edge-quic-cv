@@ -1,0 +1,61 @@
+# Stage 1: Build React frontend
+FROM node:18-alpine AS frontend-builder
+
+# Use an app directory
+WORKDIR /app
+
+# Copy node project files
+COPY package*.json ./
+COPY webpack.config.js ./
+COPY tsconfig.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy React source (src/, public/ if present)
+COPY src ./src
+
+
+# Build React app (output -> /app/dist)
+RUN npm run build
+
+
+# Stage 2: Python backend + built frontend
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for OpenCV, PyTorch, networking
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    bash \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy your Python app
+COPY quic_server.py .
+
+# Copy the built React frontend
+COPY --from=frontend-builder /app/frontend/build ./frontend/build
+
+# Generate SSL certificates
+RUN openssl req -new -x509 -days 365 -nodes \
+    -out cert.pem -keyout key.pem \
+    -subj "/CN=localhost"
+
+# Ports
+EXPOSE 5005/udp 6000/udp 8080 8081
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+CMD ["python", "-u", "quic_server.py"]

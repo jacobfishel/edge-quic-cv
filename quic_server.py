@@ -5,8 +5,6 @@ import threading
 import queue
 import base64
 import socket
-from aioquic.asyncio import serve
-from aioquic.quic.configuration import QuicConfiguration
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 import websockets
@@ -15,7 +13,23 @@ import time
 from ultralytics import YOLO
 
 
+# ============================================================================
+# CONFIGURATION - Change IP addresses and ports here
+# ============================================================================
+# Azure VM public IP (for external connections)
+AZURE_VM_IP = "74.179.82.115"
+
+# Server bindings (0.0.0.0 = listen on all interfaces for external connections)
+FLASK_HOST = "0.0.0.0"    # Flask server bind address (0.0.0.0 = all interfaces)
+FLASK_PORT = 8080         # Flask server port
+WEBSOCKET_HOST = "0.0.0.0"  # WebSocket server bind address (0.0.0.0 = all interfaces)
+WEBSOCKET_PORT = 8081     # WebSocket server port
+UDP_HOST = "0.0.0.0"      # UDP receiver bind address (0.0.0.0 = all interfaces)
+UDP_PORT = 6000           # UDP receiver port (must match client)
+
+# ============================================================================
 # Thread-safe queue for frames
+# ============================================================================
 frame_queue = queue.Queue(maxsize=5)
 # Queue for WebSocket clients (thread-safe)
 websocket_clients = set()
@@ -38,10 +52,6 @@ latest_frames_lock = threading.Lock()
 # Frame skipping: process every Nth frame (1 = every frame, 3 = every 3rd frame)
 FRAME_SKIP = 3  # Process every 3rd frame to improve FPS
 
-# UDP configuration
-UDP_HOST = "0.0.0.0"
-UDP_PORT = 5005
-
 # Match the client's capture size
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
@@ -63,15 +73,6 @@ def index():
     return send_from_directory('frontend/build', 'index.html')
 
 
-@app.route('/detections')
-def detections():
-    return {
-        'faces': [],
-        'count': 0,
-        'timestamp': None
-    }
-
-
 @app.route('/<path:path>')
 def serve_static(path):
     return send_from_directory('frontend/build', path)
@@ -79,75 +80,6 @@ def serve_static(path):
 
 
 
-async def handle_stream(reader, writer):
-    """Handle QUIC stream - process incoming video frames."""
-    print("[+] Client connected over QUIC stream.")
-    buffer = b""
-    frame_count = 0
-    skip_counter = 0  # Counter for frame skipping
-
-
-    try:
-        while True:
-            # Read incoming data
-            data = await reader.read(65536)
-            if not data:
-                break
-            buffer += data
-
-
-            # Process complete frames
-            while len(buffer) >= FRAME_SIZE:
-                frame_data = buffer[:FRAME_SIZE]
-                buffer = buffer[FRAME_SIZE:]
-
-
-                # Frame skipping: only process every Nth frame
-                skip_counter += 1
-                if skip_counter % FRAME_SKIP != 0:
-                    continue  # Skip this frame
-
-
-                # Convert bytes → numpy frame
-                frame = np.frombuffer(frame_data, dtype=np.uint8).reshape(
-                    (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
-                )
-
-
-                # Push to display queue (non-blocking)
-                try:
-                    frame_queue.put_nowait(frame)
-                    frame_count += 1
-                    if frame_count % 30 == 0:  # Log every 30 frames
-                        print(f"[*] Processed {frame_count} frames (skipping {FRAME_SKIP-1} out of {FRAME_SKIP}), Queue size: {frame_queue.qsize()}")
-                except queue.Full:
-                    # Drop oldest frame and add new one
-                    try:
-                        frame_queue.get_nowait()
-                        frame_queue.put_nowait(frame)
-                    except:
-                        pass
-
-
-    except asyncio.IncompleteReadError:
-        print("[!] Client disconnected.")
-    except Exception as e:
-        print(f"[!] Stream error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        writer.close()
-        await writer.wait_closed()
-        print(f"[*] Client stream closed. Total frames: {frame_count}")
-
-
-def create_stream_handler():
-    """Create a stream handler that properly awaits the async function."""
-    def handler(reader, writer):
-        # Get the current event loop and create a task
-        loop = asyncio.get_event_loop()
-        loop.create_task(handle_stream(reader, writer))
-    return handler
 
 def udp_frame_receiver():
     """UDP receiver thread - receives frames from client via UDP (handles chunked frames)."""
@@ -677,34 +609,6 @@ def frame_broadcaster():
             frame = frame_queue.get(timeout=1)
             frame_id += 1
            
-            # Feed 1: Original (raw frame) - resize before encoding
-            original_frame = frame.copy()
-            if RESIZE_FACTOR < 1.0:
-                new_width = int(original_frame.shape[1] * RESIZE_FACTOR)
-                new_height = int(original_frame.shape[0] * RESIZE_FACTOR)
-                original_frame = cv2.resize(original_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-            original_b64 = encode_frame(original_frame, quality=JPEG_QUALITY, resize_factor=None)
-           
-            # Feed 2: Processed (with potential annotations) - resize before encoding
-            processed_frame = frame.copy()
-            if RESIZE_FACTOR < 1.0:
-                new_width = int(processed_frame.shape[1] * RESIZE_FACTOR)
-                new_height = int(processed_frame.shape[0] * RESIZE_FACTOR)
-                processed_frame = cv2.resize(processed_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-            cv2.putText(processed_frame, 'Processed Feed', (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            processed_b64 = encode_frame(processed_frame, quality=JPEG_QUALITY, resize_factor=None)
-           
-            # Feed 3: Detection overlay (visualization view) - resize before encoding
-            overlay_frame = frame.copy()
-            if RESIZE_FACTOR < 1.0:
-                new_width = int(overlay_frame.shape[1] * RESIZE_FACTOR)
-                new_height = int(overlay_frame.shape[0] * RESIZE_FACTOR)
-                overlay_frame = cv2.resize(overlay_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-            cv2.putText(overlay_frame, 'Detection Overlay', (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            overlay_b64 = encode_frame(overlay_frame, quality=JPEG_QUALITY, resize_factor=None)
-           
             # Run inference on all three YOLO models
             # Each model processes the original frame independently
             detection_frame = run_yolo_detection(frame, resize_factor=RESIZE_FACTOR)
@@ -731,24 +635,12 @@ def frame_broadcaster():
                 else:
                     print("[!] Missing encoded feed: pose")
            
-            if not original_b64 or not processed_b64 or not overlay_b64:
-                print("[!] Failed to encode frame")
-                continue
-           
             # Get a snapshot of clients
             with websocket_clients_lock:
                 clients_copy = list(websocket_clients)
            
             if len(clients_copy) > 0:
-                # Send each feed as a separate message (one message per feed)
-                # Send original feeds first
-                original_feeds = [
-                    ('original', original_b64),
-                    ('processed', processed_b64),
-                    ('overlay', overlay_b64)
-                ]
-                
-                # Send YOLO model feeds separately (one message per model)
+                # Send YOLO model feeds (one message per model)
                 yolo_feeds = []
                 with latest_frames_lock:
                     if latest_frames['detection']:
@@ -758,8 +650,9 @@ def frame_broadcaster():
                     if latest_frames['pose']:
                         yolo_feeds.append(('pose', latest_frames['pose']))
                 
-                # Combine all feeds
-                all_feeds = original_feeds + yolo_feeds
+                # Only send if we have at least one feed
+                if not yolo_feeds:
+                    continue
                
                 # Schedule sends without blocking - send ONE message per feed
                 for client in clients_copy:
@@ -790,7 +683,7 @@ def frame_broadcaster():
                            
                             # Fire and forget - don't wait for result
                             asyncio.run_coroutine_threadsafe(
-                                send_feeds_individually(client, all_feeds, frame_id, len(clients_copy)), 
+                                send_feeds_individually(client, yolo_feeds, frame_id, len(clients_copy)), 
                                 ws_loop
                             )
                     except Exception as e:
@@ -865,8 +758,8 @@ async def websocket_handler(websocket):
 
 def run_flask():
     """Run Flask server in a separate thread."""
-    print("[*] Starting Flask server on http://127.0.0.1:8080")
-    app.run(host='127.0.0.1', port=8080, debug=False, use_reloader=False)
+    print(f"[*] Starting Flask server on http://{FLASK_HOST}:{FLASK_PORT}")
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False, use_reloader=False)
 
 
 def run_websocket_server():
@@ -874,11 +767,11 @@ def run_websocket_server():
     global ws_loop
     ws_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(ws_loop)
-    print("[*] Starting WebSocket server on ws://127.0.0.1:8081")
+    print(f"[*] Starting WebSocket server on ws://{WEBSOCKET_HOST}:{WEBSOCKET_PORT}")
    
     async def start_ws_server():
-        server = await websockets.serve(websocket_handler, "127.0.0.1", 8081)
-        print("[*] WebSocket server running on port 8081.")
+        server = await websockets.serve(websocket_handler, WEBSOCKET_HOST, WEBSOCKET_PORT)
+        print(f"[*] WebSocket server running on port {WEBSOCKET_PORT}.")
         await asyncio.Future()  # Run forever
    
     ws_loop.run_until_complete(start_ws_server())
@@ -918,12 +811,6 @@ async def main():
         print("[!] Continuing without pose estimation inference")
         model_pose = None
    
-    # Load QUIC configuration
-    quic_config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])
-    quic_config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
-    print("[✓] QUIC configuration loaded")
-
-
     # Start Flask server thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -949,44 +836,28 @@ async def main():
     broadcaster_thread.start()
     print("[✓] Frame broadcaster started")
 
-
-    # Start QUIC server (kept for backward compatibility, but UDP is primary)
-    print("[*] Starting QUIC server on udp://127.0.0.1:6000...")
+    print("\n" + "=" * 50)
+    print("All servers running!")
+    print("=" * 50)
+    print("NETWORK CONFIGURATION SUMMARY:")
+    print("=" * 50)
+    print(f"  • Flask Server:     http://{FLASK_HOST}:{FLASK_PORT} (bind: 0.0.0.0)")
+    print(f"  • WebSocket Server: ws://{WEBSOCKET_HOST}:{WEBSOCKET_PORT} (bind: 0.0.0.0)")
+    print(f"  • UDP Receiver:     udp://{UDP_HOST}:{UDP_PORT} (bind: 0.0.0.0)")
+    print("")
+    print("EXTERNAL CONNECTIONS:")
+    print("=" * 50)
+    print(f"  • Frontend URL:     http://{AZURE_VM_IP}:{FLASK_PORT}")
+    print(f"  • WebSocket URL:   ws://{AZURE_VM_IP}:{WEBSOCKET_PORT}")
+    print(f"  • Client UDP:       {AZURE_VM_IP}:{UDP_PORT}")
+    print("=" * 50)
+    print("\nPress Ctrl+C to stop.\n")
+   
+    # Keep the event loop running forever
     try:
-        # Create stream handler wrapper
-        stream_handler = create_stream_handler()
-       
-        # Start the QUIC server
-        server_task = asyncio.create_task(serve(
-            host="127.0.0.1",
-            port=6000,
-            configuration=quic_config,
-            stream_handler=stream_handler,
-        ))
-       
-        await asyncio.sleep(0.5)  # Give it a moment to start
-        print("[✓] QUIC server started")
-       
-        print("\n" + "=" * 50)
-        print("All servers running!")
-        print("=" * 50)
-        print("  • Frontend:  http://127.0.0.1:8080")
-        print("  • WebSocket: ws://127.0.0.1:8081")
-        print("  • UDP:       udp://0.0.0.0:5005 (PRIMARY)")
-        print("  • QUIC:      udp://127.0.0.1:6000 (legacy)")
-        print("=" * 50)
-        print("\nPress Ctrl+C to stop.\n")
-       
-        # Keep the event loop running forever
         await asyncio.Future()
-       
     except KeyboardInterrupt:
         print("\n[!] Shutting down...")
-    except Exception as e:
-        print(f"[!] QUIC Server error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
 
 
 
