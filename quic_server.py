@@ -865,8 +865,10 @@ async def websocket_handler(websocket):
 
 def run_flask():
     """Run Flask server in a separate thread."""
-    print("[*] Starting Flask server on http://127.0.0.1:8080")
-    app.run(host='127.0.0.1', port=8080, debug=False, use_reloader=False)
+    host = '127.0.0.1'
+    port = 8080
+    print(f"[*] Starting Flask server on http://{host}:{port}")
+    app.run(host, port, debug=False, use_reloader=False)
 
 
 def run_websocket_server():
