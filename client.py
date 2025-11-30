@@ -2,8 +2,9 @@ import cv2
 import socket
 import time
 
-CLOUD_HOST = "127.0.0.1"
-UDP_PORT = 5005
+# Azure VM public IP and port
+CLOUD_HOST = "74.179.82.115"
+UDP_PORT = 6000
 
 def main():
     # Open webcam
