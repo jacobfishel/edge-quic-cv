@@ -32,6 +32,7 @@ const Dashboard: React.FC = () => {
   const [lastMessage, setLastMessage] = useState<string>('');
   const wsRef = useRef<WebSocket | null>(null);
 
+  const WEBSOCKET_URL = `wss://${window.location.hostname}`;
 
   useEffect(() => {
     const connectWebSocket = () => {

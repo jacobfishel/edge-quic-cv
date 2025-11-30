@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node modules (will be installed in Docker)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Frontend build output (will be built in Docker)
+frontend/build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation
+*.md
+README.md
+docs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Deployment files
+deployment-info.txt
+deploy-to-azure.sh
+start_server.sh
+start_client.sh
+
+# Local test data
+test_data/
+sample_images/
+*.mp4
+*.avi
+*.mov
+
+# Certificate files (generated in Docker)
+cert.pem
+key.pem
+
+# Azure
+.azure/
+
+# Client files (runs on Raspberry Pi, not in cloud)
+client.py
+edge_client.py
+udp_client.py
+
+# YOLO model weights (will be downloaded in Docker)
+*.pt
+*.pth
+*.weights
+
+# Logs
+*.log
