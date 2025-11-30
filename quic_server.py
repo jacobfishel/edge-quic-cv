@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 # CONFIGURATION - Change IP addresses and ports here
 # ============================================================================
 # Azure VM public IP (for external connections)
-AZURE_VM_IP = "192.168.4.54"
+AZURE_VM_IP = "74.179.82.115"
 
 # Server bindings (0.0.0.0 = listen on all interfaces for external connections)
 FLASK_HOST = "0.0.0.0"    # Flask server bind address (0.0.0.0 = all interfaces)
@@ -31,7 +31,7 @@ UDP_PORT = 6000           # UDP receiver port (must match client)
 # ============================================================================
 # Thread-safe queue for frames
 # ============================================================================
-frame_queue = queue.Queue(maxsize=10)  # Increased from 5 to reduce frame drops
+frame_queue = queue.Queue(maxsize=20)  # Increased from 5 to reduce frame drops
 # Queue for WebSocket clients (thread-safe)
 websocket_clients = set()
 websocket_clients_lock = threading.Lock()
@@ -56,7 +56,7 @@ latest_frames_lock = threading.Lock()
 
 
 # Frame skipping: process every Nth frame (1 = every frame, 2 = every 2nd frame, etc.)
-FRAME_SKIP = 1  # Process every frame for smoother video (changed from 3)
+FRAME_SKIP = 5  # Process every frame for smoother video (changed from 3)
 
 # Match the client's capture size
 FRAME_WIDTH = 640
@@ -66,7 +66,7 @@ FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * FRAME_CHANNELS
 
 # Performance settings
 JPEG_QUALITY = 40  # Lower quality for better performance
-RESIZE_FACTOR = 0.75  # Resize frames to 75% for faster processing (optional, set to 1.0 to disable)
+RESIZE_FACTOR = 0.5  # Resize frames to 75% for faster processing (optional, set to 1.0 to disable)
 
 
 # Flask app for serving frontend
