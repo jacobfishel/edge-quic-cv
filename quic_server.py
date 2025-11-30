@@ -11,13 +11,14 @@ import websockets
 import json
 import time
 from ultralytics import YOLO
+from concurrent.futures import ThreadPoolExecutor
 
 
 # ============================================================================
 # CONFIGURATION - Change IP addresses and ports here
 # ============================================================================
 # Azure VM public IP (for external connections)
-AZURE_VM_IP = "74.179.82.115"
+AZURE_VM_IP = "192.168.4.54"
 
 # Server bindings (0.0.0.0 = listen on all interfaces for external connections)
 FLASK_HOST = "0.0.0.0"    # Flask server bind address (0.0.0.0 = all interfaces)
@@ -30,7 +31,7 @@ UDP_PORT = 6000           # UDP receiver port (must match client)
 # ============================================================================
 # Thread-safe queue for frames
 # ============================================================================
-frame_queue = queue.Queue(maxsize=5)
+frame_queue = queue.Queue(maxsize=10)  # Increased from 5 to reduce frame drops
 # Queue for WebSocket clients (thread-safe)
 websocket_clients = set()
 websocket_clients_lock = threading.Lock()
@@ -42,15 +43,20 @@ ws_loop = None
 model_det = None  # Standard detection model
 model_seg = None  # Segmentation model
 model_pose = None  # Pose estimation model
-yolo_model_lock = threading.Lock()
+# Separate locks per model to allow parallel inference
+yolo_model_lock_det = threading.Lock()
+yolo_model_lock_seg = threading.Lock()
+yolo_model_lock_pose = threading.Lock()
+# Thread pool for parallel YOLO inference
+yolo_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yolo")
 
 # Thread-safe buffers for latest encoded frames (one per model)
 latest_frames = {'detection': None, 'segmentation': None, 'pose': None}
 latest_frames_lock = threading.Lock()
 
 
-# Frame skipping: process every Nth frame (1 = every frame, 3 = every 3rd frame)
-FRAME_SKIP = 3  # Process every 3rd frame to improve FPS
+# Frame skipping: process every Nth frame (1 = every frame, 2 = every 2nd frame, etc.)
+FRAME_SKIP = 1  # Process every frame for smoother video (changed from 3)
 
 # Match the client's capture size
 FRAME_WIDTH = 640
@@ -257,7 +263,7 @@ def run_yolo_detection(frame, resize_factor=RESIZE_FACTOR):
         return frame.copy()
    
     try:
-        with yolo_model_lock:
+        with yolo_model_lock_det:
             # Store original frame dimensions
             original_height, original_width = frame.shape[:2]
             
@@ -358,7 +364,7 @@ def run_yolo_segmentation(frame, resize_factor=RESIZE_FACTOR):
         return frame.copy()
    
     try:
-        with yolo_model_lock:
+        with yolo_model_lock_seg:
             # Store original frame dimensions
             original_height, original_width = frame.shape[:2]
             
@@ -473,7 +479,7 @@ def run_yolo_pose(frame, resize_factor=RESIZE_FACTOR):
         return frame.copy()
    
     try:
-        with yolo_model_lock:
+        with yolo_model_lock_pose:
             # Store original frame dimensions
             original_height, original_width = frame.shape[:2]
             
@@ -609,11 +615,20 @@ def frame_broadcaster():
             frame = frame_queue.get(timeout=1)
             frame_id += 1
            
-            # Run inference on all three YOLO models
+            # Run inference on all three YOLO models IN PARALLEL for better performance
             # Each model processes the original frame independently
-            detection_frame = run_yolo_detection(frame, resize_factor=RESIZE_FACTOR)
-            segmentation_frame = run_yolo_segmentation(frame, resize_factor=RESIZE_FACTOR)
-            pose_frame = run_yolo_pose(frame, resize_factor=RESIZE_FACTOR)
+            # Use ThreadPoolExecutor for efficient parallel execution
+            frame_copy = frame.copy()  # Copy once for all threads
+            
+            # Submit all three inference tasks in parallel
+            future_det = yolo_executor.submit(run_yolo_detection, frame_copy, RESIZE_FACTOR)
+            future_seg = yolo_executor.submit(run_yolo_segmentation, frame_copy, RESIZE_FACTOR)
+            future_pose = yolo_executor.submit(run_yolo_pose, frame_copy, RESIZE_FACTOR)
+            
+            # Wait for all to complete and get results
+            detection_frame = future_det.result()
+            segmentation_frame = future_seg.result()
+            pose_frame = future_pose.result()
             
             # Encode each annotated frame to base64 JPEG
             det_b64 = encode_frame(detection_frame, quality=JPEG_QUALITY, resize_factor=None)
