@@ -17,6 +17,8 @@ async def main():
         print("Cannot open webcam")
         return
 
+    frame_counter = 0
+
     async with connect(CLOUD_HOST, CLOUD_PORT, configuration=config) as client:
         # create a bidirectional stream
         reader, writer = await client.create_stream()
@@ -28,16 +30,28 @@ async def main():
                 #print("reading frame")
                 if not ret:
                     break
+                    
+                # Optional downscaling for performance
+                frame = cv2.resize(frame, (640, 480))
 
-                # convert frame to bytes (uncompressed raw data)
-                data = frame.tobytes()
-                # length = len(data).to_bytes(4, 'big')  # send 4-byte length prefix
+                # JPEG encode the frame to dramatically reduce size
+                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if not ok:
+                    continue
 
-                # write to the QUIC stream
-                writer.write(data)
-                #print("writing to QUIC stream")
-                await writer.drain()  # ensure data is sent
-                #print("ensure data is sent")
+                data = encoded.tobytes()
+
+                # 4-byte big-endian length prefix
+                length = len(data).to_bytes(4, "big")
+
+                # write framed, compressed data to the QUIC stream
+                writer.write(length + data)
+
+                frame_counter += 1
+                # Only drain occasionally to avoid stalling the stream
+                if frame_counter % 10 == 0:
+                    await writer.drain()
+
                 await asyncio.sleep(0.03)
 
         except KeyboardInterrupt:

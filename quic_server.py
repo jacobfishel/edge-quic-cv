@@ -11,6 +11,7 @@ from flask_cors import CORS
 import websockets
 import json
 import time
+from ultralytics import YOLO
 
 # Thread-safe queue for frames
 frame_queue = queue.Queue(maxsize=5)
@@ -19,6 +20,9 @@ websocket_clients = set()
 websocket_clients_lock = threading.Lock()
 # Event loop for WebSocket server
 ws_loop = None
+
+# YOLOv8 model (loaded once globally)
+yolo_model = YOLO("yolov8n.pt")
 
 # Match the client's capture size
 FRAME_WIDTH = 640
@@ -47,43 +51,108 @@ def serve_static(path):
     return send_from_directory('frontend/build', path)
 
 
+async def read_exact(reader, n: int):
+    """Read exactly n bytes from the reader, or return None if EOF is reached early."""
+    data = b""
+    while len(data) < n:
+        chunk = await reader.read(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+async def process_frame_bytes(frame_bytes: bytes, frame_id: int):
+    """Decode JPEG bytes, run YOLOv8 person detection, and push annotated frame to the queue."""
+    try:
+        # Decode JPEG to numpy array (BGR frame)
+        np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            print(f"[!] Failed to decode frame {frame_id}")
+            return
+
+        # Run YOLOv8 inference and keep only 'person' detections (COCO class 0)
+        try:
+            results = yolo_model(frame, verbose=False)
+        except Exception as e:
+            print(f"[!] YOLO inference error on frame {frame_id}: {e}")
+            results = None
+
+        if results and len(results) > 0:
+            r = results[0]
+            boxes = r.boxes
+            if boxes is not None:
+                for box in boxes:
+                    cls_id = int(box.cls[0])
+                    # COCO class 0 is "person"
+                    if cls_id != 0:
+                        continue
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    conf = float(box.conf[0])
+
+                    # Draw bounding box and label for person detections
+                    cv2.rectangle(
+                        frame,
+                        (int(x1), int(y1)),
+                        (int(x2), int(y2)),
+                        (0, 255, 0),
+                        2,
+                    )
+                    label = f"person {conf:.2f}"
+                    cv2.putText(
+                        frame,
+                        label,
+                        (int(x1), max(int(y1) - 5, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+        # Push to display queue (non-blocking)
+        try:
+            frame_queue.put_nowait(frame)
+            if frame_id % 30 == 0:  # Log every 30 frames
+                print(f"[*] Processed {frame_id} frames, Queue size: {frame_queue.qsize()}")
+        except queue.Full:
+            # Drop oldest frame and add new one
+            try:
+                frame_queue.get_nowait()
+                frame_queue.put_nowait(frame)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[!] Error processing frame {frame_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def handle_stream(reader, writer):
     """Handle QUIC stream - process incoming video frames."""
     print("[+] Client connected over QUIC stream.")
-    buffer = b""
     frame_count = 0
 
     try:
         while True:
-            # Read incoming data
-            data = await reader.read(65536)
-            if not data:
+            # Read 4-byte length prefix
+            length_bytes = await read_exact(reader, 4)
+            if not length_bytes:
                 break
-            buffer += data
+            frame_length = int.from_bytes(length_bytes, "big")
+            if frame_length <= 0:
+                continue
 
-            # Process complete frames
-            while len(buffer) >= FRAME_SIZE:
-                frame_data = buffer[:FRAME_SIZE]
-                buffer = buffer[FRAME_SIZE:]
+            # Read the exact frame payload
+            frame_data = await read_exact(reader, frame_length)
+            if frame_data is None:
+                break
 
-                # Convert bytes → numpy frame
-                frame = np.frombuffer(frame_data, dtype=np.uint8).reshape(
-                    (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
-                )
+            frame_count += 1
 
-                # Push to display queue (non-blocking)
-                try:
-                    frame_queue.put_nowait(frame)
-                    frame_count += 1
-                    if frame_count % 30 == 0:  # Log every 30 frames
-                        print(f"[*] Processed {frame_count} frames, Queue size: {frame_queue.qsize()}")
-                except queue.Full:
-                    # Drop oldest frame and add new one
-                    try:
-                        frame_queue.get_nowait()
-                        frame_queue.put_nowait(frame)
-                    except:
-                        pass
+            # Process frame in the background so the QUIC handler is not blocked
+            asyncio.create_task(process_frame_bytes(frame_data, frame_count))
 
     except asyncio.IncompleteReadError:
         print("[!] Client disconnected.")
@@ -113,87 +182,60 @@ def encode_frame(frame, quality=85):
     frame_bytes = buffer.tobytes()
     return base64.b64encode(frame_bytes).decode('utf-8')
 
+
 def frame_broadcaster():
-    """Broadcasts three video streams to all WebSocket clients."""
+    """Broadcast a single processed video stream to all WebSocket clients."""
     global ws_loop
     broadcast_count = 0
     last_log_time = time.time()
     frame_id = 0
     print("[*] Frame broadcaster thread started")
-    
+
     while True:
         try:
             # Use timeout to avoid blocking forever
             frame = frame_queue.get(timeout=1)
             frame_id += 1
-            
-            # Create three different video feeds
-            # Feed 1: Original (raw frame)
-            original_frame = frame.copy()
-            original_b64 = encode_frame(original_frame, quality=85)
-            
-            # Feed 2: Processed (with potential annotations)
-            processed_frame = frame.copy()
-            cv2.putText(processed_frame, 'Processed Feed', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            processed_b64 = encode_frame(processed_frame, quality=85)
-            
-            # Feed 3: Detection overlay (visualization view)
-            overlay_frame = frame.copy()
-            cv2.putText(overlay_frame, 'Detection Overlay', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            overlay_b64 = encode_frame(overlay_frame, quality=85)
-            
-            if not original_b64 or not processed_b64 or not overlay_b64:
+
+            # Encode the single processed (annotated) frame
+            processed_b64 = encode_frame(frame, quality=85)
+            if not processed_b64:
                 print("[!] Failed to encode frame")
                 continue
-            
+
             # Get a snapshot of clients
             with websocket_clients_lock:
                 clients_copy = list(websocket_clients)
-            
+
             if len(clients_copy) > 0:
-                # Send each feed as a separate message with frame ID for synchronization
-                feeds = [
-                    ('original', original_b64),
-                    ('processed', processed_b64),
-                    ('overlay', overlay_b64)
-                ]
-                
                 # Schedule sends without blocking
                 for client in clients_copy:
                     try:
                         if ws_loop and ws_loop.is_running():
-                            # Create async function with proper closure - send all three feeds
-                            async def send_feeds(client_ws, feed_list, current_frame_id):
+                            async def send_frame(client_ws, frame_b64, current_frame_id):
                                 try:
-                                    for feed_name, feed_data in feed_list:
-                                        msg = json.dumps({
-                                            'type': 'frame', 
-                                            'feed': feed_name, 
-                                            'data': feed_data, 
-                                            'frameId': current_frame_id
-                                        })
-                                        await client_ws.send(msg)
-                                    # Log first frame of each batch for debugging
+                                    msg = json.dumps({
+                                        'type': 'frame',
+                                        'data': frame_b64,
+                                        'frameId': current_frame_id,
+                                    })
+                                    await client_ws.send(msg)
                                     if current_frame_id == 1 or current_frame_id % 30 == 0:
-                                        print(f"[*] Sent frame {current_frame_id} with all 3 feeds to WebSocket client")
+                                        print(f"[*] Sent frame {current_frame_id} to WebSocket client")
                                 except Exception as e:
-                                    print(f"[!] Error sending feeds to client: {e}")
-                                    raise  # Re-raise to remove client
-                            
-                            # Fire and forget - don't wait for result
+                                    print(f"[!] Error sending frame to client: {e}")
+                                    raise
+
                             asyncio.run_coroutine_threadsafe(
-                                send_feeds(client, feeds, frame_id), 
-                                ws_loop
+                                send_frame(client, processed_b64, frame_id),
+                                ws_loop,
                             )
                     except Exception as e:
                         print(f"[!] Error scheduling send to client: {e}")
-                        # Mark for removal in the websocket handler itself
-                
+
                 broadcast_count += 1
-                
-                # Log periodically (every 2 seconds instead of every 30 frames)
+
+                # Log periodically (every 2 seconds)
                 current_time = time.time()
                 if current_time - last_log_time >= 2.0:
                     fps = broadcast_count / (current_time - last_log_time) if broadcast_count > 0 else 0
@@ -205,7 +247,7 @@ def frame_broadcaster():
                 if broadcast_count % 100 == 0:
                     print(f"[!] No WebSocket clients connected. Frames in queue: {frame_queue.qsize()}")
                 broadcast_count += 1
-            
+
         except queue.Empty:
             # No frames available, just continue
             continue
@@ -213,7 +255,6 @@ def frame_broadcaster():
             print(f"[!] Frame broadcaster error: {e}")
             import traceback
             traceback.print_exc()
-            # Add a small delay to prevent tight error loop
             time.sleep(0.1)
 
 async def websocket_handler(websocket):
