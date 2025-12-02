@@ -1,17 +1,13 @@
-import asyncio
 import cv2
-from aioquic.asyncio import connect
-from aioquic.quic.configuration import QuicConfiguration
+import socket
+import time
 
-CLOUD_HOST = "127.0.0.1"
-CLOUD_PORT = 6000
+# Azure VM public IP and port
+CLOUD_HOST = "74.179.82.115"
+UDP_PORT = 6000
 
-async def main():
-    # QUIC configuration
-    config = QuicConfiguration(is_client=True, alpn_protocols=["hq-29"])
-    config.verify_mode = False  # for self-signed certs during testing
-
-    # open webcam
+def main():
+    # Open webcam
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Cannot open webcam")
@@ -54,13 +50,14 @@ async def main():
 
                 await asyncio.sleep(0.03)
 
-        except KeyboardInterrupt:
-            print("\nStopped streaming.")
-        finally:
-            cap.release()
-            writer.close()
-            await writer.wait_closed()
-            await client.wait_closed()
-            print("release resources")
+    except KeyboardInterrupt:
+        print("\nStopped streaming.")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cap.release()
+        sock.close()
+        print("Released resources")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

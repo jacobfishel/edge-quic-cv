@@ -8,7 +8,12 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     const connectWebSocket = () => {
       try {
-        const ws = new WebSocket('ws://localhost:8081');
+        // Connect to Azure VM WebSocket server
+        // Use window.location.hostname for same-origin, or hardcode VM IP for external access
+        const wsHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+          ? '74.179.82.115'  // Azure VM IP when accessing remotely
+          : window.location.hostname;  // Use current hostname when served from VM
+        const ws = new WebSocket(`ws://${wsHost}:8081`);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -26,9 +31,11 @@ const Dashboard: React.FC = () => {
           }
         };
 
+
         ws.onerror = () => {
           setConnectionStatus('Error');
         };
+
 
         ws.onclose = () => {
           setConnectionStatus('Disconnected');
@@ -40,6 +47,7 @@ const Dashboard: React.FC = () => {
       }
     };
 
+
     connectWebSocket();
 
     return () => {
@@ -49,6 +57,7 @@ const Dashboard: React.FC = () => {
     };
   }, []);
 
+
   const containerStyle: React.CSSProperties = {
     fontFamily: 'Arial, sans-serif',
     margin: '0',
@@ -57,6 +66,7 @@ const Dashboard: React.FC = () => {
     background: '#1a1a1a',
     color: '#e0e0e0',
   };
+
 
   const sectionStyle: React.CSSProperties = {
     background: '#2d2d2d',
@@ -76,12 +86,14 @@ const Dashboard: React.FC = () => {
     color: 'white',
   };
 
+
   return (
     <div style={containerStyle}>
       <h1 style={{ color: '#e0e0e0', marginBottom: '20px' }}>
         QUIC YOLOv8 Person Detection
         <span style={statusStyle}>{connectionStatus}</span>
       </h1>
+
 
       <div style={sectionStyle}>
         <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Live Inference Video</h2>
@@ -127,5 +139,7 @@ const Dashboard: React.FC = () => {
   );
 };
 
+
 export default Dashboard;
+
 
