@@ -13,45 +13,42 @@ def main():
         print("Cannot open webcam")
         return
 
-    # Create UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    print(f"Connected. Sending JPEG-compressed frames via UDP to {CLOUD_HOST}:{UDP_PORT}... (Ctrl+C to stop)")
+    frame_counter = 0
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    async with connect(CLOUD_HOST, CLOUD_PORT, configuration=config) as client:
+        # create a bidirectional stream
+        reader, writer = await client.create_stream()
+        print("Connected. Sending raw frames... (Ctrl+C to stop)")
 
-            # Encode frame to JPEG before sending (compressed)
-            success, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
-            if not success:
-                print("Failed to encode frame to JPEG")
-                continue
-            
-            # Convert JPEG encoded frame to bytes
-            data = encoded.tobytes()
-            
-            # Send via UDP
-            # Note: UDP max packet size is ~65507 bytes
-            # JPEG frames are much smaller than raw frames, but may still need chunking
-            chunk_size = 60000  # Safe chunk size for UDP
-            total_size = len(data)
-            
-            # Send frame in chunks with header
-            # Header: 4 bytes for total size, 4 bytes for chunk index
-            num_chunks = (total_size + chunk_size - 1) // chunk_size
-            for i in range(num_chunks):
-                start = i * chunk_size
-                end = min(start + chunk_size, total_size)
-                chunk = data[start:end]
-                
-                # Prepend header: total_size (4 bytes) + chunk_index (4 bytes) + chunk_data
-                header = total_size.to_bytes(4, 'big') + i.to_bytes(4, 'big')
-                sock.sendto(header + chunk, (CLOUD_HOST, UDP_PORT))
-            
-            # Small delay to avoid overwhelming the network
-            time.sleep(0.03)
+        try:
+            while True:
+                ret, frame = cap.read()
+                #print("reading frame")
+                if not ret:
+                    break
+                    
+                # Optional downscaling for performance
+                frame = cv2.resize(frame, (640, 480))
+
+                # JPEG encode the frame to dramatically reduce size
+                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if not ok:
+                    continue
+
+                data = encoded.tobytes()
+
+                # 4-byte big-endian length prefix
+                length = len(data).to_bytes(4, "big")
+
+                # write framed, compressed data to the QUIC stream
+                writer.write(length + data)
+
+                frame_counter += 1
+                # Only drain occasionally to avoid stalling the stream
+                if frame_counter % 10 == 0:
+                    await writer.drain()
+
+                await asyncio.sleep(0.03)
 
     except KeyboardInterrupt:
         print("\nStopped streaming.")

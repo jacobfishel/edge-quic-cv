@@ -1,10 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-
 const Dashboard: React.FC = () => {
-  const [detectedVideoSrc, setDetectedVideoSrc] = useState<string>('');
-  const [segmentedVideoSrc, setSegmentedVideoSrc] = useState<string>('');
-  const [poseVideoSrc, setPoseVideoSrc] = useState<string>('');
+  const [videoSrc, setVideoSrc] = useState<string>('');
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -26,17 +23,8 @@ const Dashboard: React.FC = () => {
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            if (message.type === 'frame' && message.data && message.feed) {
-              // Handle individual feed messages
-              const feedType = message.feed;
-              
-              if (feedType === 'detection') {
-                setDetectedVideoSrc(`data:image/jpeg;base64,${message.data}`);
-              } else if (feedType === 'segmentation') {
-                setSegmentedVideoSrc(`data:image/jpeg;base64,${message.data}`);
-              } else if (feedType === 'pose') {
-                setPoseVideoSrc(`data:image/jpeg;base64,${message.data}`);
-              }
+            if (message.type === 'frame' && message.data) {
+              setVideoSrc(`data:image/jpeg;base64,${message.data}`);
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
@@ -88,7 +76,6 @@ const Dashboard: React.FC = () => {
     boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
   };
 
-
   const statusStyle: React.CSSProperties = {
     display: 'inline-block',
     padding: '4px 12px',
@@ -103,112 +90,51 @@ const Dashboard: React.FC = () => {
   return (
     <div style={containerStyle}>
       <h1 style={{ color: '#e0e0e0', marginBottom: '20px' }}>
-        QUIC Video Dashboard
+        QUIC YOLOv8 Person Detection
         <span style={statusStyle}>{connectionStatus}</span>
       </h1>
 
 
       <div style={sectionStyle}>
-        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>YOLOv8 Model Feeds</h2>
-        <div style={{
-          display: 'flex',
-          flexDirection: 'row',
-          gap: '20px',
-          marginTop: '20px',
-          flexWrap: 'wrap'
-        }}>
-          {/* YOLOv8 Detection Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              YOLOv8 Detection
-            </h3>
-            {detectedVideoSrc ? (
-              <img
-                src={detectedVideoSrc}
-                alt="YOLOv8 detection stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #9C27B0',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
+        <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Live Inference Video</h2>
+        <div
+          style={{
+            marginTop: '20px',
+            background: '#1a1a1a',
+            padding: '15px',
+            borderRadius: '8px',
+            maxWidth: '480px',
+            marginLeft: 'auto',
+            marginRight: 'auto',
+          }}
+        >
+          {videoSrc ? (
+            <img
+              src={videoSrc}
+              alt="YOLOv8 person detection stream"
+              style={{
+                width: '100%',
+                height: 'auto',
+                border: '2px solid #4CAF50',
+                borderRadius: '4px',
+                display: 'block',
+              }}
+            />
+          ) : (
+            <div
+              style={{
                 padding: '60px 20px',
                 textAlign: 'center',
                 color: '#888',
                 background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for YOLOv8 detection feed...
-              </div>
-            )}
-          </div>
-
-          {/* YOLOv8 Segmentation Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              YOLOv8 Segmentation
-            </h3>
-            {segmentedVideoSrc ? (
-              <img
-                src={segmentedVideoSrc}
-                alt="YOLOv8 segmentation stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #00BCD4',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
-                padding: '60px 20px',
-                textAlign: 'center',
-                color: '#888',
-                background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for YOLOv8 segmentation feed...
-              </div>
-            )}
-          </div>
-
-          {/* YOLOv8 Pose Estimation Feed */}
-          <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '8px', flex: '1', minWidth: '300px' }}>
-            <h3 style={{ color: '#e0e0e0', marginTop: '0', marginBottom: '10px', fontSize: '18px' }}>
-              YOLOv8 Pose Estimation
-            </h3>
-            {poseVideoSrc ? (
-              <img
-                src={poseVideoSrc}
-                alt="YOLOv8 pose estimation stream"
-                style={{
-                  width: '100%',
-                  height: 'auto',
-                  border: '2px solid #FF5722',
-                  borderRadius: '4px',
-                  display: 'block'
-                }}
-              />
-            ) : (
-              <div style={{
-                padding: '60px 20px',
-                textAlign: 'center',
-                color: '#888',
-                background: '#2d2d2d',
-                borderRadius: '4px'
-              }}>
-                Waiting for YOLOv8 pose estimation feed...
-              </div>
-            )}
-          </div>
+                borderRadius: '4px',
+              }}
+            >
+              Waiting for video feed...
+            </div>
+          )}
         </div>
       </div>
-
     </div>
   );
 };
