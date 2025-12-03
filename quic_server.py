@@ -15,7 +15,7 @@ import time
 from ultralytics import YOLO
 
 # Network configuration
-AZURE_VM_IP = "127.0.0.1"
+AZURE_VM_IP = "74.179.82.115"
 FLASK_HOST = "0.0.0.0"  # Bind to all interfaces to accept external connections
 FLASK_PORT = 8080
 WEBSOCKET_HOST = "0.0.0.0"  # Bind to all interfaces to accept external connections
@@ -459,9 +459,9 @@ async def main():
         print(f"  • QUIC:      udp://{AZURE_VM_IP}:{QUIC_PORT}")
         print("=" * 50)
         print("\nPress Ctrl+C to stop.\n")
-        print(f"Running in LOCAL MODE on 127.0.0.1:{FLASK_PORT}")
-        print(f"Running in LOCAL MODE on 127.0.0.1:{WEBSOCKET_PORT}")
-        print(f"Running in LOCAL MODE on 127.0.0.1:{QUIC_PORT}")
+        print(f"Running in VM MODE on 127.0.0.1:{FLASK_PORT}")
+        print(f"Running in VM MODE on 127.0.0.1:{WEBSOCKET_PORT}")
+        print(f"Running in LOVMCAL MODE on 127.0.0.1:{QUIC_PORT}")
         
         # Keep the event loop running forever
         await asyncio.Future()
