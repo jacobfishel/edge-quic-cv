@@ -24,10 +24,14 @@ const Dashboard: React.FC = () => {
   const [lastMessage, setLastMessage] = useState<string>('');
   const wsRef = useRef<WebSocket | null>(null);
 
+  const apiHost = window.location.hostname || 'localhost';
+  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${wsScheme}://${apiHost}:8081`;
+
   useEffect(() => {
     const connectWebSocket = () => {
       try {
-        const ws = new WebSocket('ws://localhost:8081');
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -85,7 +89,7 @@ const Dashboard: React.FC = () => {
 
     const fetchDetections = async () => {
       try {
-        const response = await fetch('http://localhost:8080/detections');
+        const response = await fetch(`http://${apiHost}:8080/detections`);
         const data: DetectionResults = await response.json();
         setDetections(data);
       } catch (error) {

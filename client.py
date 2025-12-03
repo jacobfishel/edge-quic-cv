@@ -4,7 +4,8 @@ import struct
 from aioquic.asyncio import connect
 from aioquic.quic.configuration import QuicConfiguration
 
-CLOUD_HOST = "74.179.82.115"  # Azure VM IP
+# Azure VM public IP for QUIC server
+CLOUD_HOST = "74.179.82.115"
 CLOUD_PORT = 6000
 COMPRESSION_QUALITY = 50
 
