@@ -4,8 +4,8 @@ import struct
 from aioquic.asyncio import connect
 from aioquic.quic.configuration import QuicConfiguration
 
-# Azure VM public IP for QUIC server
-CLOUD_HOST = "74.179.82.115"
+# QUIC server address (local testing)
+CLOUD_HOST = "127.0.0.1"
 CLOUD_PORT = 6000
 COMPRESSION_QUALITY = 50
 
@@ -13,6 +13,8 @@ async def main():
     # QUIC configuration
     config = QuicConfiguration(is_client=True, alpn_protocols=["hq-29"])
     config.verify_mode = False  # for self-signed certs during testing
+
+    print(f"Running in LOCAL MODE on 127.0.0.1:{CLOUD_PORT}")
 
     # open webcam
     cap = cv2.VideoCapture(0)

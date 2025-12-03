@@ -15,7 +15,7 @@ import time
 from ultralytics import YOLO
 
 # Network configuration
-AZURE_VM_IP = "74.179.82.115"
+AZURE_VM_IP = "127.0.0.1"
 FLASK_HOST = "0.0.0.0"  # Bind to all interfaces to accept external connections
 FLASK_PORT = 8080
 WEBSOCKET_HOST = "0.0.0.0"  # Bind to all interfaces to accept external connections
@@ -31,8 +31,10 @@ websocket_clients_lock = threading.Lock()
 # Event loop for WebSocket server
 ws_loop = None
 
-# YOLO model (loaded once at startup)
-yolo_model = None
+# YOLO models (loaded once at startup)
+YOLO_DET_MODEL = None   # Object detection
+YOLO_SEG_MODEL = None   # Instance segmentation
+YOLO_POSE_MODEL = None  # Pose estimation
 
 # Flask app for serving frontend
 app = Flask(__name__, static_folder='frontend/build', static_url_path='')
@@ -127,27 +129,106 @@ def encode_frame(frame, quality=85):
     frame_bytes = buffer.tobytes()
     return base64.b64encode(frame_bytes).decode('utf-8')
 
-def detect_persons(frame):
-    """Run YOLOv8 person detection and draw bounding boxes."""
-    global yolo_model
-    if yolo_model is None:
+
+def run_detection(frame):
+    """Run YOLOv8 object detection and draw bounding boxes."""
+    global YOLO_DET_MODEL
+    if YOLO_DET_MODEL is None:
         return frame
-    
-    results = yolo_model(frame, verbose=False)
+
+    results = YOLO_DET_MODEL(frame, verbose=False)
     if results and len(results) > 0 and results[0].boxes is not None:
         boxes = results[0].boxes
         for box in boxes:
-            # Only detect person class (class 0)
-            if int(box.cls) == 0:
+            class_id = int(box.cls)
+            class_name = YOLO_DET_MODEL.names.get(class_id, "")
+            # Only draw detections for the "person" class
+            if class_name == "person":
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 conf = float(box.conf[0].cpu().numpy())
                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                cv2.putText(frame, f'Person {conf:.2f}', (int(x1), int(y1)-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(
+                    frame,
+                    f'Person {conf:.2f}',
+                    (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2,
+                )
+    return frame
+
+
+def run_segmentation(frame):
+    """Run YOLOv8 instance segmentation and return annotated frame."""
+    global YOLO_SEG_MODEL
+    if YOLO_SEG_MODEL is None:
+        return frame
+
+    results = YOLO_SEG_MODEL(frame, verbose=False)
+    if results and len(results) > 0:
+        r = results[0]
+        boxes = r.boxes
+        if boxes is not None and len(boxes) > 0:
+            # Filter to only "person" class based on model names
+            cls_tensor = boxes.cls
+            keep_indices = []
+            for idx, cls_value in enumerate(cls_tensor):
+                class_id = int(cls_value)
+                class_name = YOLO_SEG_MODEL.names.get(class_id, "")
+                if class_name == "person":
+                    keep_indices.append(idx)
+
+            if not keep_indices:
+                return frame
+
+            # Apply filtering to boxes and masks before plotting
+            boxes.data = boxes.data[keep_indices]
+            if r.masks is not None and r.masks.data is not None:
+                r.masks.data = r.masks.data[keep_indices]
+
+        # ultralytics plot() returns an annotated image
+        annotated = r.plot()
+        return annotated
+    return frame
+
+
+def run_pose(frame):
+    """Run YOLOv8 pose estimation and return annotated frame."""
+    global YOLO_POSE_MODEL
+    if YOLO_POSE_MODEL is None:
+        return frame
+
+    results = YOLO_POSE_MODEL(frame, verbose=False)
+    if results and len(results) > 0:
+        r = results[0]
+        boxes = r.boxes
+        keypoints = getattr(r, "keypoints", None)
+
+        if boxes is not None and len(boxes) > 0:
+            # Filter to only "person" class based on model names
+            cls_tensor = boxes.cls
+            keep_indices = []
+            for idx, cls_value in enumerate(cls_tensor):
+                class_id = int(cls_value)
+                class_name = YOLO_POSE_MODEL.names.get(class_id, "")
+                if class_name == "person":
+                    keep_indices.append(idx)
+
+            if not keep_indices:
+                return frame
+
+            # Apply filtering to boxes and keypoints before plotting
+            boxes.data = boxes.data[keep_indices]
+            if keypoints is not None and keypoints.data is not None:
+                keypoints.data = keypoints.data[keep_indices]
+
+        annotated = r.plot()
+        return annotated
     return frame
 
 def frame_broadcaster():
-    """Broadcasts single video stream to all WebSocket clients."""
+    """Broadcasts video stream to all WebSocket clients and shows combined YOLO views."""
     global ws_loop
     broadcast_count = 0
     last_log_time = time.time()
@@ -159,14 +240,32 @@ def frame_broadcaster():
             # Use timeout to avoid blocking forever
             frame = frame_queue.get(timeout=1)
             frame_id += 1
-            
-            # Run person detection
-            frame = detect_persons(frame)
-            
-            # Encode frame
-            frame_b64 = encode_frame(frame, quality=85)
-            if not frame_b64:
-                print("[!] Failed to encode frame")
+
+            # Run all three YOLOv8 tasks on copies of the same frame
+            detect_frame = run_detection(frame.copy())
+            segment_frame = run_segmentation(frame.copy())
+            pose_frame = run_pose(frame.copy())
+
+            # Ensure frames have the same height before concatenation, if needed
+            try:
+                h = min(detect_frame.shape[0], segment_frame.shape[0], pose_frame.shape[0])
+                detect_frame = cv2.resize(detect_frame, (int(detect_frame.shape[1] * h / detect_frame.shape[0]), h))
+                segment_frame = cv2.resize(segment_frame, (int(segment_frame.shape[1] * h / segment_frame.shape[0]), h))
+                pose_frame = cv2.resize(pose_frame, (int(pose_frame.shape[1] * h / pose_frame.shape[0]), h))
+                combined_frame = cv2.hconcat([detect_frame, segment_frame, pose_frame])
+            except Exception:
+                combined_frame = detect_frame
+
+            # Local OpenCV display disabled for headless/remote operation
+            # Previously used cv2.imshow and cv2.waitKey here.
+
+            # Encode each YOLO view frame (use detection as the primary stream)
+            detect_b64 = encode_frame(detect_frame, quality=85)
+            segment_b64 = encode_frame(segment_frame, quality=85)
+            pose_b64 = encode_frame(pose_frame, quality=85)
+
+            if not detect_b64:
+                print("[!] Failed to encode detection frame")
                 continue
             
             # Get a snapshot of clients
@@ -174,11 +273,14 @@ def frame_broadcaster():
                 clients_copy = list(websocket_clients)
             
             if len(clients_copy) > 0:
-                # Send single feed
+                # Send multi-feed frame payload (preserve original 'data' field for compatibility)
                 msg = json.dumps({
                     'type': 'frame',
                     'feed': 'original',
-                    'data': frame_b64
+                    'data': detect_b64,
+                    'detect': detect_b64,
+                    'segment': segment_b64,
+                    'pose': pose_b64
                 })
                 
                 # Schedule sends without blocking
@@ -283,18 +385,32 @@ def run_websocket_server():
     ws_loop.run_until_complete(start_ws_server())
 
 async def main():
-    global yolo_model
+    global YOLO_DET_MODEL, YOLO_SEG_MODEL, YOLO_POSE_MODEL
     print("=" * 50)
     print("Starting Edge QUIC CV Server")
     print("=" * 50)
     
-    # Load YOLO model once at startup
+    # Load YOLO models once at startup
     try:
-        yolo_model = YOLO('yolov8n.pt')
-        print("[✓] YOLOv8 model loaded")
+        YOLO_DET_MODEL = YOLO('yolov8n.pt')
+        print("[✓] YOLOv8 detection model loaded")
     except Exception as e:
-        print(f"[!] Failed to load YOLO model: {e}")
-        yolo_model = None
+        print(f"[!] Failed to load YOLO detection model: {e}")
+        YOLO_DET_MODEL = None
+
+    try:
+        YOLO_SEG_MODEL = YOLO('yolov8n-seg.pt')
+        print("[✓] YOLOv8 segmentation model loaded")
+    except Exception as e:
+        print(f"[!] Failed to load YOLO segmentation model: {e}")
+        YOLO_SEG_MODEL = None
+
+    try:
+        YOLO_POSE_MODEL = YOLO('yolov8n-pose.pt')
+        print("[✓] YOLOv8 pose model loaded")
+    except Exception as e:
+        print(f"[!] Failed to load YOLO pose model: {e}")
+        YOLO_POSE_MODEL = None
     
     # Load QUIC configuration
     quic_config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])
@@ -343,6 +459,9 @@ async def main():
         print(f"  • QUIC:      udp://{AZURE_VM_IP}:{QUIC_PORT}")
         print("=" * 50)
         print("\nPress Ctrl+C to stop.\n")
+        print(f"Running in LOCAL MODE on 127.0.0.1:{FLASK_PORT}")
+        print(f"Running in LOCAL MODE on 127.0.0.1:{WEBSOCKET_PORT}")
+        print(f"Running in LOCAL MODE on 127.0.0.1:{QUIC_PORT}")
         
         # Keep the event loop running forever
         await asyncio.Future()

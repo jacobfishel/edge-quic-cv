@@ -17,7 +17,9 @@ const Dashboard: React.FC = () => {
     count: 0,
     timestamp: null,
   });
-  const [videoSrc, setVideoSrc] = useState<string>('');
+  const [detectSrc, setDetectSrc] = useState<string>('');
+  const [segmentSrc, setSegmentSrc] = useState<string>('');
+  const [poseSrc, setPoseSrc] = useState<string>('');
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
   const [debugData, setDebugData] = useState<string>('');
   const [messageCount, setMessageCount] = useState<number>(0);
@@ -51,12 +53,24 @@ const Dashboard: React.FC = () => {
           try {
             const message = JSON.parse(event.data);
             if (message.type === 'frame' && message.data) {
-              // Handle frame message (support both feed and non-feed formats)
-              if (message.feed === 'original' || !message.feed) {
-                setVideoSrc(`data:image/jpeg;base64,${message.data}`);
-              } else if (message.feed) {
-                // Handle other feed types by updating the single video element
-                setVideoSrc(`data:image/jpeg;base64,${message.data}`);
+              // Handle frame message (support both legacy single-feed and new multi-feed formats)
+              const hasMultiFeeds = message.detect || message.segment || message.pose;
+
+              if (hasMultiFeeds) {
+                const detectData = message.detect || message.data;
+                const segmentData = message.segment || message.data;
+                const poseData = message.pose || message.data;
+
+                setDetectSrc(`data:image/jpeg;base64,${detectData}`);
+                setSegmentSrc(`data:image/jpeg;base64,${segmentData}`);
+                setPoseSrc(`data:image/jpeg;base64,${poseData}`);
+              } else {
+                // Legacy behavior: single video feed
+                const frameData = message.data;
+                const src = `data:image/jpeg;base64,${frameData}`;
+                setDetectSrc(src);
+                setSegmentSrc('');
+                setPoseSrc('');
               }
             } else if (message.type === 'test') {
               setDebugData(`Test message received: ${message.message}\n\nWaiting for frame data...`);
@@ -159,18 +173,65 @@ const Dashboard: React.FC = () => {
 
       <div style={sectionStyle}>
         <h2 style={{ color: '#e0e0e0', marginTop: '0' }}>Video Feed</h2>
-        {videoSrc ? (
-          <img 
-            src={videoSrc} 
-            alt="Video stream" 
-            style={{ 
-              width: '50%', 
-              height: 'auto',
-              border: '2px solid #4CAF50', 
-              borderRadius: '4px', 
-              display: 'block' 
-            }} 
-          />
+        {detectSrc || segmentSrc || poseSrc ? (
+          <div
+            style={{
+              display: 'flex',
+              gap: '12px',
+              alignItems: 'flex-start',
+              justifyContent: 'flex-start',
+              flexWrap: 'wrap',
+            }}
+          >
+            {detectSrc && (
+              <div style={{ flex: '1 1 30%' }}>
+                <div style={{ marginBottom: '8px', color: '#e0e0e0' }}>Detect</div>
+                <img
+                  src={detectSrc}
+                  alt="Detection stream"
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    border: '2px solid #4CAF50',
+                    borderRadius: '4px',
+                    display: 'block',
+                  }}
+                />
+              </div>
+            )}
+            {segmentSrc && (
+              <div style={{ flex: '1 1 30%' }}>
+                <div style={{ marginBottom: '8px', color: '#e0e0e0' }}>Segment</div>
+                <img
+                  src={segmentSrc}
+                  alt="Segmentation stream"
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    border: '2px solid #4CAF50',
+                    borderRadius: '4px',
+                    display: 'block',
+                  }}
+                />
+              </div>
+            )}
+            {poseSrc && (
+              <div style={{ flex: '1 1 30%' }}>
+                <div style={{ marginBottom: '8px', color: '#e0e0e0' }}>Pose</div>
+                <img
+                  src={poseSrc}
+                  alt="Pose stream"
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    border: '2px solid #4CAF50',
+                    borderRadius: '4px',
+                    display: 'block',
+                  }}
+                />
+              </div>
+            )}
+          </div>
         ) : (
           <div style={{ 
             padding: '60px 20px', 
