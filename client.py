@@ -1,10 +1,12 @@
 import asyncio
 import cv2
+import struct
 from aioquic.asyncio import connect
 from aioquic.quic.configuration import QuicConfiguration
 
 CLOUD_HOST = "127.0.0.1"
 CLOUD_PORT = 6000
+COMPRESSION_QUALITY = 50
 
 async def main():
     # QUIC configuration
@@ -29,12 +31,19 @@ async def main():
                 if not ret:
                     break
 
-                # convert frame to bytes (uncompressed raw data)
-                data = frame.tobytes()
-                # length = len(data).to_bytes(4, 'big')  # send 4-byte length prefix
+                # Encode frame with compression
+                success, encoded = cv2.imencode(".webp", frame, [int(cv2.IMWRITE_WEBP_QUALITY), COMPRESSION_QUALITY])
+                if not success:
+                    # Fallback to JPEG if WEBP fails
+                    success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, COMPRESSION_QUALITY])
+                if not success:
+                    continue
+                
+                data = encoded.tobytes()
+                length_prefix = struct.pack('>I', len(data))
 
                 # write to the QUIC stream
-                writer.write(data)
+                writer.write(length_prefix + data)
                 #print("writing to QUIC stream")
                 await writer.drain()  # ensure data is sent
                 #print("ensure data is sent")

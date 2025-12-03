@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import queue
 import base64
+import struct
 from aioquic.asyncio import serve
 from aioquic.quic.configuration import QuicConfiguration
 from flask import Flask, send_from_directory
@@ -11,6 +12,7 @@ from flask_cors import CORS
 import websockets
 import json
 import time
+from ultralytics import YOLO
 
 # Thread-safe queue for frames
 frame_queue = queue.Queue(maxsize=5)
@@ -20,11 +22,8 @@ websocket_clients_lock = threading.Lock()
 # Event loop for WebSocket server
 ws_loop = None
 
-# Match the client's capture size
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
-FRAME_CHANNELS = 3
-FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * FRAME_CHANNELS
+# YOLO model (loaded once at startup)
+yolo_model = None
 
 # Flask app for serving frontend
 app = Flask(__name__, static_folder='frontend/build', static_url_path='')
@@ -48,7 +47,7 @@ def serve_static(path):
 
 
 async def handle_stream(reader, writer):
-    """Handle QUIC stream - process incoming video frames."""
+    """Handle QUIC stream - process incoming compressed video frames."""
     print("[+] Client connected over QUIC stream.")
     buffer = b""
     frame_count = 0
@@ -61,15 +60,21 @@ async def handle_stream(reader, writer):
                 break
             buffer += data
 
-            # Process complete frames
-            while len(buffer) >= FRAME_SIZE:
-                frame_data = buffer[:FRAME_SIZE]
-                buffer = buffer[FRAME_SIZE:]
+            # Process complete frames (length prefix + compressed data)
+            while len(buffer) >= 4:
+                # Read length prefix
+                length = struct.unpack('>I', buffer[:4])[0]
+                if len(buffer) < 4 + length:
+                    break
+                
+                # Extract compressed frame data
+                compressed_data = buffer[4:4+length]
+                buffer = buffer[4+length:]
 
-                # Convert bytes → numpy frame
-                frame = np.frombuffer(frame_data, dtype=np.uint8).reshape(
-                    (FRAME_HEIGHT, FRAME_WIDTH, FRAME_CHANNELS)
-                )
+                # Decode compressed frame
+                frame = cv2.imdecode(np.frombuffer(compressed_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
 
                 # Push to display queue (non-blocking)
                 try:
@@ -113,8 +118,27 @@ def encode_frame(frame, quality=85):
     frame_bytes = buffer.tobytes()
     return base64.b64encode(frame_bytes).decode('utf-8')
 
+def detect_persons(frame):
+    """Run YOLOv8 person detection and draw bounding boxes."""
+    global yolo_model
+    if yolo_model is None:
+        return frame
+    
+    results = yolo_model(frame, verbose=False)
+    if results and len(results) > 0 and results[0].boxes is not None:
+        boxes = results[0].boxes
+        for box in boxes:
+            # Only detect person class (class 0)
+            if int(box.cls) == 0:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = float(box.conf[0].cpu().numpy())
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                cv2.putText(frame, f'Person {conf:.2f}', (int(x1), int(y1)-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    return frame
+
 def frame_broadcaster():
-    """Broadcasts three video streams to all WebSocket clients."""
+    """Broadcasts single video stream to all WebSocket clients."""
     global ws_loop
     broadcast_count = 0
     last_log_time = time.time()
@@ -127,24 +151,12 @@ def frame_broadcaster():
             frame = frame_queue.get(timeout=1)
             frame_id += 1
             
-            # Create three different video feeds
-            # Feed 1: Original (raw frame)
-            original_frame = frame.copy()
-            original_b64 = encode_frame(original_frame, quality=85)
+            # Run person detection
+            frame = detect_persons(frame)
             
-            # Feed 2: Processed (with potential annotations)
-            processed_frame = frame.copy()
-            cv2.putText(processed_frame, 'Processed Feed', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            processed_b64 = encode_frame(processed_frame, quality=85)
-            
-            # Feed 3: Detection overlay (visualization view)
-            overlay_frame = frame.copy()
-            cv2.putText(overlay_frame, 'Detection Overlay', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            overlay_b64 = encode_frame(overlay_frame, quality=85)
-            
-            if not original_b64 or not processed_b64 or not overlay_b64:
+            # Encode frame
+            frame_b64 = encode_frame(frame, quality=85)
+            if not frame_b64:
                 print("[!] Failed to encode frame")
                 continue
             
@@ -153,43 +165,30 @@ def frame_broadcaster():
                 clients_copy = list(websocket_clients)
             
             if len(clients_copy) > 0:
-                # Send each feed as a separate message with frame ID for synchronization
-                feeds = [
-                    ('original', original_b64),
-                    ('processed', processed_b64),
-                    ('overlay', overlay_b64)
-                ]
+                # Send single feed
+                msg = json.dumps({
+                    'type': 'frame',
+                    'feed': 'original',
+                    'data': frame_b64
+                })
                 
                 # Schedule sends without blocking
                 for client in clients_copy:
                     try:
                         if ws_loop and ws_loop.is_running():
-                            # Create async function with proper closure - send all three feeds
-                            async def send_feeds(client_ws, feed_list, current_frame_id):
+                            async def send_frame(client_ws, message):
                                 try:
-                                    for feed_name, feed_data in feed_list:
-                                        msg = json.dumps({
-                                            'type': 'frame', 
-                                            'feed': feed_name, 
-                                            'data': feed_data, 
-                                            'frameId': current_frame_id
-                                        })
-                                        await client_ws.send(msg)
-                                    # Log first frame of each batch for debugging
-                                    if current_frame_id == 1 or current_frame_id % 30 == 0:
-                                        print(f"[*] Sent frame {current_frame_id} with all 3 feeds to WebSocket client")
+                                    await client_ws.send(message)
                                 except Exception as e:
-                                    print(f"[!] Error sending feeds to client: {e}")
-                                    raise  # Re-raise to remove client
+                                    print(f"[!] Error sending frame to client: {e}")
+                                    raise
                             
-                            # Fire and forget - don't wait for result
                             asyncio.run_coroutine_threadsafe(
-                                send_feeds(client, feeds, frame_id), 
+                                send_frame(client, msg),
                                 ws_loop
                             )
                     except Exception as e:
                         print(f"[!] Error scheduling send to client: {e}")
-                        # Mark for removal in the websocket handler itself
                 
                 broadcast_count += 1
                 
@@ -275,9 +274,18 @@ def run_websocket_server():
     ws_loop.run_until_complete(start_ws_server())
 
 async def main():
+    global yolo_model
     print("=" * 50)
     print("Starting Edge QUIC CV Server")
     print("=" * 50)
+    
+    # Load YOLO model once at startup
+    try:
+        yolo_model = YOLO('yolov8n.pt')
+        print("[✓] YOLOv8 model loaded")
+    except Exception as e:
+        print(f"[!] Failed to load YOLO model: {e}")
+        yolo_model = None
     
     # Load QUIC configuration
     quic_config = QuicConfiguration(is_client=False, alpn_protocols=["hq-29"])
