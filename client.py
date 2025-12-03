@@ -1,4 +1,3 @@
-import asyncio
 import cv2
 import struct
 from aioquic.asyncio import connect
@@ -18,6 +17,8 @@ async def main():
     if not cap.isOpened():
         print("Cannot open webcam")
         return
+
+    frame_counter = 0
 
     async with connect(CLOUD_HOST, CLOUD_PORT, configuration=config) as client:
         # create a bidirectional stream
@@ -49,13 +50,14 @@ async def main():
                 #print("ensure data is sent")
                 await asyncio.sleep(0.03)
 
-        except KeyboardInterrupt:
-            print("\nStopped streaming.")
-        finally:
-            cap.release()
-            writer.close()
-            await writer.wait_closed()
-            await client.wait_closed()
-            print("release resources")
+    except KeyboardInterrupt:
+        print("\nStopped streaming.")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cap.release()
+        sock.close()
+        print("Released resources")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

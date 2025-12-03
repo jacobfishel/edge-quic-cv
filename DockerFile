@@ -1,0 +1,84 @@
+# Stage 1: Build React frontend
+FROM node:18-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Copy package files
+COPY package*.json ./
+
+# Install Node.js dependencies
+RUN npm install
+
+# Copy frontend source
+COPY frontend/ ./
+COPY public/ ./public/ 2>/dev/null || true
+
+# Build the React frontend (creates build directory)
+RUN npm run build
+
+# Stage 2: Python application with built React frontend
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for OpenCV, PyTorch, OpenSSL, and networking
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    openssl \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install all Python dependencies including standard PyTorch
+# This will install torch==2.9.1 and torchvision==0.24.1 from PyPI (includes CUDA support)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY quic_server.py .
+
+# Copy the built React frontend from Stage 1
+COPY --from=frontend-builder /app/frontend/build ./frontend/build
+
+# Generate SSL certificates (cert.pem and key.pem) as per README
+RUN openssl req -new -x509 -days 365 -nodes \
+    -out cert.pem -keyout key.pem \
+    -subj "/CN=localhost"
+
+# Create directory for Ultralytics models cache
+# This is where yolov8n.pt, yolov8n-seg.pt, and yolov8n-pose.pt will be downloaded
+RUN mkdir -p /root/.config/Ultralytics
+
+# Pre-download YOLO models to speed up first startup (optional but recommended)
+# This downloads the models during build time instead of runtime
+RUN python -c "from ultralytics import YOLO; \
+    print('Downloading YOLOv8 models...'); \
+    YOLO('yolov8n.pt'); \
+    YOLO('yolov8n-seg.pt'); \
+    YOLO('yolov8n-pose.pt'); \
+    print('All YOLO models downloaded successfully')"
+
+# Expose ports for all services:
+# - 5005: UDP receiver (PRIMARY - receives video from client) - UDP
+# - 6000: QUIC server (legacy/backup) - UDP  
+# - 8080: Flask server (serves React frontend) - TCP
+# - 8081: WebSocket server (streams video to frontend) - TCP
+EXPOSE 5005/udp 6000/udp 8080 8081
+
+# Set environment variables for better Python performance
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Health check to verify Flask server is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/8080' || exit 1
+
+# Start the QUIC server (which starts all servers: QUIC, Flask, WebSocket, UDP)
+CMD ["python", "-u", "quic_server.py"]
