@@ -13,6 +13,7 @@ import websockets
 import json
 import time
 from ultralytics import YOLO
+from deepface import DeepFace
 
 # Network configuration
 AZURE_VM_IP = "74.179.82.115"
@@ -33,6 +34,10 @@ ws_loop = None
 
 # YOLO model (loaded once at startup)
 yolo_model = None
+VERIFIED_IMAGE_PATH = "verified.jpg"
+DEEPFACE_INTERVAL = 10
+last_person_statuses = []
+detection_frame_counter = 0
 
 # Flask app for serving frontend
 app = Flask(__name__, static_folder='frontend/build', static_url_path='')
@@ -128,22 +133,65 @@ def encode_frame(frame, quality=85):
     return base64.b64encode(frame_bytes).decode('utf-8')
 
 def detect_persons(frame):
-    """Run YOLOv8 person detection and draw bounding boxes."""
-    global yolo_model
+    """Run YOLOv8 person detection and verify faces against verified.jpg."""
+    global yolo_model, detection_frame_counter, last_person_statuses
     if yolo_model is None:
         return frame
-    
+
+    detection_frame_counter += 1
+    should_verify = (detection_frame_counter % DEEPFACE_INTERVAL) == 0
+
     results = yolo_model(frame, verbose=False)
     if results and len(results) > 0 and results[0].boxes is not None:
         boxes = results[0].boxes
+        person_index = 0
         for box in boxes:
             # Only detect person class (class 0)
             if int(box.cls) == 0:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 conf = float(box.conf[0].cpu().numpy())
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                cv2.putText(frame, f'Person {conf:.2f}', (int(x1), int(y1)-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # Clamp coordinates to valid frame bounds before cropping
+                x1i = max(0, int(x1))
+                y1i = max(0, int(y1))
+                x2i = min(frame.shape[1], int(x2))
+                y2i = min(frame.shape[0], int(y2))
+
+                if person_index >= len(last_person_statuses):
+                    missing = person_index - len(last_person_statuses) + 1
+                    last_person_statuses.extend([False] * missing)
+
+                if should_verify and x2i > x1i and y2i > y1i:
+                    person_crop = frame[y1i:y2i, x1i:x2i]
+                    try:
+                        result = DeepFace.verify(
+                            img1_path=person_crop,
+                            img2_path=VERIFIED_IMAGE_PATH,
+                            enforce_detection=False
+                        )
+                        last_person_statuses[person_index] = bool(result.get("verified", False))
+                    except Exception:
+                        last_person_statuses[person_index] = False
+
+                is_verified = last_person_statuses[person_index]
+                color = (0, 255, 0) if is_verified else (0, 0, 255)
+                label = "Verified" if is_verified else "Unknown"
+
+                cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), color, 2)
+                cv2.putText(
+                    frame,
+                    f"{label} {conf:.2f}",
+                    (x1i, max(15, y1i - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2
+                )
+                person_index += 1
+
+        if person_index < len(last_person_statuses):
+            last_person_statuses = last_person_statuses[:person_index]
+
     return frame
 
 def frame_broadcaster():
